@@ -1,0 +1,35 @@
+[project]
+name = "litellm-gateway"
+version = "0.1.0"
+description = "独立 LiteLLM 模型网关组件（项目内独立 uv 环境，无数据库）"
+authors = [
+    { name = "ratiolin", email = "metratio@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "litellm[proxy]==1.96.0",
+    # litellm==1.96.0 的代理代码仍 import fastapi.dependencies.utils.get_flat_dependant，
+    # 该符号在 fastapi>=0.137 被移除（上游元数据却允许 <1.0）。固定 0.136.x 以保持兼容，
+    # 详见 CONFORMANCE.md「发现的偏差」。
+    "fastapi>=0.136.0,<0.137.0",
+    # litellm 1.96.0 认证异常处理器在 DB-less 下无条件 import prisma，
+    # 缺失时任何认证失败都会 500。安装 prisma 以恢复标准 401 语义（仍不连接数据库）。
+    "prisma==0.15.0",
+    "zstandard>=0.25.0",
+]
+
+[project.scripts]
+litellm-gateway = "litellm_gateway:main"
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+]

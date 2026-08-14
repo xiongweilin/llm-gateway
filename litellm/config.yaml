@@ -1,0 +1,61 @@
+# =============================================================================
+# LiteLLM 网关配置 —— 唯一配置事实源
+# =============================================================================
+# 运行方式（仅回环监听，默认 127.0.0.1:4000）：
+#   uv run litellm --config config.yaml --host 127.0.0.1 --port 4000
+#
+# 安全约定（本文件绝不出现明文 key）：
+#   * 网关 master key：由环境变量 LITELLM_MASTER_KEY 注入（见 general_settings.master_key）
+#   * 上游 provider key：一律使用 os.environ/<VAR> 引用
+#   * 无数据库运行：不设置 database_url / store_model_in_db=false，配置只来自本文件
+#
+# 并发安全说明：litellm 1.96.0 的 CLI 默认 --host 为 0.0.0.0，
+# 本仓库把“仅绑定 loopback”作为标准运行方式，通过 --host 127.0.0.1 显式约束
+# （见 README.md 与 CONFORMANCE.md）。
+
+model_list:
+  # ---- conformance 用 fake provider（OpenAI 兼容本地服务，见 tests/fake_provider.py）----
+  - model_name: fake-responses
+    litellm_params:
+      model: fake-responses
+      custom_llm_provider: openai
+      api_base: os.environ/FAKE_PROVIDER_API_BASE   # 例如 http://127.0.0.1:PORT/v1
+      api_key: os.environ/FAKE_PROVIDER_API_KEY     # 测试内合成值，如 sk-fake-canary-5678
+      timeout: 30
+
+  # ---- 真实 provider 模板（默认注释；启用时取消注释并注入对应环境变量，不写明文）----
+  # - model_name: deepseek-chat
+  #   litellm_params:
+  #     model: deepseek/deepseek-chat
+  #     api_key: os.environ/DEEPSEEK_API_KEY
+  #
+  # - model_name: gpt-4o-mini
+  #   litellm_params:
+  #     model: openai/gpt-4o-mini
+  #     api_key: os.environ/OPENAI_API_KEY
+
+litellm_settings:
+  cache: false                  # 关闭 response cache（不启用 litellm cache 对象）
+  # 不配置 cache_params；semantic cache（type: redis-semantic）不启用
+  callbacks: []                 # 关闭外部日志 callbacks
+  success_callback: []          # 关闭成功日志 callbacks
+  failure_callback: []          # 关闭失败日志 callbacks
+  turn_off_message_logging: true  # 不记录请求/响应正文
+  suppress_debug_info: true     # 抑制调试信息输出
+  telemetry: false              # 关闭匿名遥测上报
+  # 不启用 detailed_debug：CLI 不传 --detailed_debug，也不开启 set_verbose
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY   # 由环境变量注入，不写入明文
+  store_model_in_db: false      # 无数据库：模型/配置只来自本文件，不写入 DB
+  # 不设置 database_url → 代理不连接数据库、不做配置写入
+  cancel_on_disconnect: true    # 客户端断开时取消在途上游请求（取消语义）
+  # 不设置 allowed_ips：默认允许访问；配合 --host 127.0.0.1 仅限本机回环访问
+  # Admin UI 管理：本部署无数据库，/key、/user、/team 等管理接口不可用；
+  # UI 静态页面仍由 litellm 挂载（见 CONFORMANCE.md 如实记录）
+
+router_settings:
+    num_retries: 0              # 重试由 daemon 拥有（RetryRun 可审计）；litellm 默认 2 次静默重试会绕过 Run 生命周期
+    # 稳定别名：客户端可用 fake-gw 或 fake-responses 访问同一 conformance 模型
+    model_group_alias:
+        fake-gw: fake-responses
