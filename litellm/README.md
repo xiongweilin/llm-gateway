@@ -19,7 +19,7 @@
 ## 安装
 
 ```powershell
-cd D:\download\agent\litellm-gateway\litellm
+cd D:\agent\litellm-gateway\litellm
 uv sync --locked
 ```
 
