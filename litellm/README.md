@@ -99,11 +99,17 @@ litellm/
   `https://chatgpt.com/backend-api/codex`，消耗账号余额。
 - OpenCode Go 路由声明为 `openai/<model>`，使 LiteLLM 直通
   `https://opencode.ai/zen/go/v1/responses`；不要改成 Responses-to-Chat bridge。
-- 模型来源（四模型，与 Codex 目录一致）：OpenAI 账号 `gpt-5.6-luna`
-  （`chatgpt/*`，消耗账号余额）、opencode-go `opencode-go/deepseek-v4-flash`、
-  DeepSeek 官方 `deepseek-v4-flash` 与 `deepseek-v4-pro`（裸名；v4-pro 已
-  开放，GA 版 DeepSeek-V4-Pro-0813，2026-08-12 上线）。Codex 模型目录：
-  `~/.codex/models.json`（三来源四模型）。
+- 例外：`opencode-go/mimo-v2.5` 上游只有 `chat/completions`，故声明
+  `mode: chat`。LiteLLM 1.96.0 的 `/v1/responses`→chat 桥接有 bug（把上游成功
+  响应当异常抛 500），因此 dsh 侧单独用 `litellm-chat` provider
+  （`api: openai-completions`）经网关 `/v1/chat/completions` 调用，不走桥接。
+- 模型来源（五模型）：OpenAI 账号 `gpt-5.6-luna`（`chatgpt/*`，消耗账号
+  余额）、opencode-go `opencode-go/deepseek-v4-flash`（Responses）与
+  `opencode-go/mimo-v2.5`（MiMo V2.5，1M 上下文，chat completions）、DeepSeek
+  官方 `deepseek-v4-flash` 与 `deepseek-v4-pro`（裸名；v4-pro 已开放，GA 版
+  DeepSeek-V4-Pro-0813，2026-08-12 上线）。Codex CLI 目录
+  `~/.codex/models.json` 保持四模型；dsh 桌面端经 `$DSH_HOME/settings.yaml`
+  的 `llm-pi-ai` 段读取模型目录，并经网关 4001 路由。
 - 为什么需要代理：codex 请求体带 `Content-Encoding: zstd`，LiteLLM/FastAPI
   不解压导致 model=None（400）；aiohttp 3.14 会自动解压 zstd，代理据此仅对
   仍以 zstd magic 开头的 body 手动解压。

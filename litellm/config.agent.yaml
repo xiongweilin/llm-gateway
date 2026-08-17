@@ -5,7 +5,7 @@
 # - 仅绑定 127.0.0.1；默认无 master key（本地信任模型）。
 # - num_retries=0：重试所有权归调用方（Codex/daemon），LiteLLM 只转发一次。
 model_list:
-  # 与 Codex 模型目录一致（models.json，四模型）；Codex 按目录中的模型名发送请求。
+  # 与 dsh 模型目录一致（settings.yaml 的 litellm / litellm-chat provider）；调用方按目录中的模型名发送请求。
   - model_name: opencode-go/deepseek-v4-flash
     model_info:
       mode: responses
@@ -14,6 +14,19 @@ model_list:
       api_base: https://opencode.ai/zen/go/v1
       api_key: os.environ/OPENCODEGO_API_KEY
       timeout: 60
+  # 例外：MiMo V2.5 在 opencode.ai 上游只有 chat/completions，故用 mode: chat
+  # （LiteLLM 对 /v1/responses 入口做 Responses→Chat 桥接）；其余 OpenCode Go
+  # 模型保持 mode: responses 直通原生 /responses。
+  - model_name: opencode-go/mimo-v2.5
+    model_info:
+      mode: chat
+    litellm_params:
+      model: openai/mimo-v2.5
+      api_base: https://opencode.ai/zen/go/v1
+      api_key: os.environ/OPENCODEGO_API_KEY
+      timeout: 60
+      # dsh 会带 reasoning_effort；上游 chat 不认，丢弃该参数（仅限本模型）。
+      drop_params: true
   # OpenAI 账号路由（消耗账号余额，非 API 额度）：gpt-5.6-luna 复用
   # ~/.codex/auth.json 登录态，无需 API key。
   - model_name: gpt-5.6-luna
