@@ -383,6 +383,17 @@ def adapt_collaboration_request(body: bytes) -> bytes:
             call_name = flat_call_name
         if (
             value.get("type") == "function_call"
+            and not value.get("namespace")
+            and isinstance(call_name, str)
+            and call_name in COLLABORATION_TOOLS
+        ):
+            # Some OpenCode Go responses flatten a namespaced call all the
+            # way to ``name=spawn_agent``.  Restore the namespace before the
+            # history is sent back upstream, otherwise Codex cannot match it
+            # to the collaboration handler on the next turn.
+            value["namespace"] = "collaboration"
+        if (
+            value.get("type") == "function_call"
             and value.get("namespace") == "collaboration"
             and isinstance(call_name, str)
             and call_name in COLLABORATION_TOOLS
@@ -440,6 +451,16 @@ def _force_plaintext_collaboration_calls(value) -> int:
             value["namespace"] = "collaboration"
         call_name = value.get("name")
         namespace = value.get("namespace")
+        if (
+            not namespace
+            and isinstance(call_name, str)
+            and call_name in COLLABORATION_TOOLS
+        ):
+            # OpenCode Go may omit both the namespace field and the dotted
+            # prefix.  These names are reserved for collaboration tools in
+            # Codex, so infer the namespace before returning the response.
+            value["namespace"] = "collaboration"
+            namespace = "collaboration"
     else:
         call_name = None
         namespace = None
