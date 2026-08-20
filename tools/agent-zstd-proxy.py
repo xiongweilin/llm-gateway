@@ -185,23 +185,64 @@ def normalize_agent_messages(body: bytes) -> bytes:
 
 
 def normalize_tool_schemas(body: bytes) -> bytes:
-    """Ensure every function tool schema is a JSON Schema object.
+    """Normalize function tool schemas for strict OpenCode Go validation.
 
     Codex Desktop's automation tools (e.g. ``automation_update``) may carry a
     ``parameters``/``input_schema`` whose top-level ``type`` is null. OpenAI
     accepts that, while OpenCode Go validates strictly and rejects the whole
-    request with ``invalid_request_error``. Inject ``type: "object"`` before
-    forwarding; valid schemas and non-JSON bodies are left untouched.
+    request with ``invalid_request_error``. OpenCode Go also requires every
+    property name to be present in the schema's ``required`` array. Normalize
+    those two compatibility differences only for ``opencode-go/*`` requests;
+    ChatGPT requests are left unchanged.
     """
     try:
         obj = json.loads(body)
     except Exception:
         return body
 
-    fixed = 0
+    model = obj.get("model")
+    strict_required = isinstance(model, str) and model.startswith("opencode-go/")
+    fixed_type = 0
+    fixed_required = 0
+
+    def normalize_schema(schema: dict) -> None:
+        nonlocal fixed_type, fixed_required
+
+        if schema.get("type") is None:
+            schema["type"] = "object"
+            fixed_type += 1
+
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            if strict_required:
+                required = schema.get("required")
+                normalized_required = (
+                    [name for name in required if isinstance(name, str)]
+                    if isinstance(required, list)
+                    else []
+                )
+                for name in properties:
+                    if name not in normalized_required:
+                        normalized_required.append(name)
+                if normalized_required != required:
+                    schema["required"] = normalized_required
+                    fixed_required += 1
+            for child in properties.values():
+                if isinstance(child, dict):
+                    normalize_schema(child)
+
+        for key in ("items", "additionalProperties", "contains", "not", "if", "then", "else"):
+            child = schema.get(key)
+            if isinstance(child, dict):
+                normalize_schema(child)
+        for key in ("anyOf", "allOf", "oneOf", "prefixItems"):
+            children = schema.get(key)
+            if isinstance(children, list):
+                for child in children:
+                    if isinstance(child, dict):
+                        normalize_schema(child)
 
     def visit(value) -> None:
-        nonlocal fixed
         if isinstance(value, list):
             for item in value:
                 visit(item)
@@ -212,16 +253,19 @@ def normalize_tool_schemas(body: bytes) -> bytes:
             schema = value.get("parameters")
             if not isinstance(schema, dict):
                 schema = value.get("input_schema")
-            if isinstance(schema, dict) and schema.get("type") is None:
-                schema["type"] = "object"
-                fixed += 1
+            if isinstance(schema, dict):
+                normalize_schema(schema)
         for child in value.values():
             visit(child)
 
     visit(obj)
-    if not fixed:
+    if not (fixed_type or fixed_required):
         return body
-    log.info("tool schema compatibility: fixed=%d", fixed)
+    log.info(
+        "tool schema compatibility: fixed_type=%d fixed_required=%d",
+        fixed_type,
+        fixed_required,
+    )
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
 
 

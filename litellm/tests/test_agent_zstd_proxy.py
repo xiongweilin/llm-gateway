@@ -171,7 +171,10 @@ def test_tool_schema_normalization_fixes_null_type() -> None:
             {
                 "type": "function",
                 "name": "automation_update",
-                "parameters": {"type": None, "properties": {}},
+                "parameters": {
+                    "type": None,
+                    "properties": {"limit": {"type": "integer"}},
+                },
             },
             {
                 "type": "function",
@@ -189,6 +192,7 @@ def test_tool_schema_normalization_fixes_null_type() -> None:
     normalized = json.loads(proxy.normalize_tool_schemas(json.dumps(request).encode()))
     tools = {tool["name"]: tool for tool in normalized["tools"]}
     assert tools["automation_update"]["parameters"]["type"] == "object"
+    assert tools["automation_update"]["parameters"]["required"] == ["limit"]
     assert tools["shell"]["input_schema"]["type"] == "object"
     assert tools["valid"]["parameters"]["type"] == "object"
 
@@ -235,6 +239,32 @@ def test_tool_schema_normalization_keeps_valid_request_unchanged() -> None:
             }
         ],
     }
+    raw = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode()
+    assert proxy.normalize_tool_schemas(raw) is raw
+
+
+def test_tool_schema_required_normalization_is_scoped_to_opencode() -> None:
+    request = {
+        "model": "opencode-go/muse-spark-1.2-contributor",
+        "tools": [
+            {
+                "type": "function",
+                "name": "shell",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "cmd": {"type": "string"},
+                        "limit": {"type": "integer"},
+                    },
+                    "required": ["cmd"],
+                },
+            }
+        ],
+    }
+    normalized = json.loads(proxy.normalize_tool_schemas(json.dumps(request).encode()))
+    assert normalized["tools"][0]["parameters"]["required"] == ["cmd", "limit"]
+
+    request["model"] = "gpt-5.6-luna"
     raw = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode()
     assert proxy.normalize_tool_schemas(raw) is raw
 
