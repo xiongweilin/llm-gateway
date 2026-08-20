@@ -5,20 +5,12 @@
 # - 仅绑定 127.0.0.1；默认无 master key（本地信任模型）。
 # - num_retries=0：重试所有权归调用方（Codex/daemon），LiteLLM 只转发一次。
 model_list:
-  # 与 Codex 模型目录一致（models.json，五模型）；Codex 按目录中的模型名发送请求。
+  # 与 Codex 模型目录一致（models.json，四模型）；Codex 按目录中的模型名发送请求。
   - model_name: opencode-go/deepseek-v4-flash
     model_info:
       mode: responses
     litellm_params:
       model: openai/deepseek-v4-flash
-      api_base: https://opencode.ai/zen/go/v1
-      api_key: os.environ/OPENCODEGO_API_KEY
-      timeout: 60
-  - model_name: opencode-go/muse-spark-1.2-contributor
-    model_info:
-      mode: responses
-    litellm_params:
-      model: openai/muse-spark-1.2-contributor
       api_base: https://opencode.ai/zen/go/v1
       api_key: os.environ/OPENCODEGO_API_KEY
       timeout: 60
