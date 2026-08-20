@@ -11,6 +11,7 @@ import asyncio
 from collections import Counter
 import json
 import logging
+import math
 import sys
 
 import aiohttp
@@ -39,6 +40,7 @@ TOOL_OUTPUT_TYPES = {
     "function_call_output",
     "local_shell_call_output",
 }
+TOOL_NAME_INPUT_TYPES = TOOL_CALL_TYPES | {"tool_search_call", "web_search_call"}
 
 
 def _json_tokens(value) -> int:
@@ -59,6 +61,7 @@ def request_summary(body: bytes) -> dict[str, object]:
     roles: Counter[str] = Counter()
     types: Counter[str] = Counter()
     type_bytes: Counter[str] = Counter()
+    input_call_names: Counter[str] = Counter()
     agent_content_types: Counter[str] = Counter()
     largest_items = []
     for item in items:
@@ -72,6 +75,9 @@ def request_summary(body: bytes) -> dict[str, object]:
         roles[str(role or "none")] += 1
         types[item_type_name] += 1
         type_bytes[item_type_name] += item_bytes
+        if item_type in TOOL_NAME_INPUT_TYPES:
+            name = item.get("name")
+            input_call_names[f"{item_type}:{name if isinstance(name, str) and name else '<none>'}"] += 1
         largest_items.append((item_bytes, item_type_name))
         if item_type == "agent_message":
             content = item.get("content")
@@ -82,6 +88,26 @@ def request_summary(body: bytes) -> dict[str, object]:
 
     instructions = obj.get("instructions")
     tools = obj.get("tools")
+    tool_declaration_types: Counter[str] = Counter()
+    tool_declaration_names: Counter[str] = Counter()
+
+    def visit_tool_declaration(value) -> None:
+        if not isinstance(value, dict):
+            return
+        declaration_type = value.get("type")
+        if isinstance(declaration_type, str):
+            tool_declaration_types[declaration_type] += 1
+            name = value.get("name")
+            if isinstance(name, str) and name:
+                tool_declaration_names[f"{declaration_type}:{name}"] += 1
+        children = value.get("tools")
+        if isinstance(children, list):
+            for child in children:
+                visit_tool_declaration(child)
+
+    if isinstance(tools, list):
+        for tool in tools:
+            visit_tool_declaration(tool)
     return {
         "body_bytes": len(body),
         "estimated_tokens": _json_tokens(obj),
@@ -89,6 +115,7 @@ def request_summary(body: bytes) -> dict[str, object]:
         "input_items": len(items),
         "input_roles": dict(sorted(roles.items())),
         "input_types": dict(sorted(types.items())),
+        "input_call_names": dict(sorted(input_call_names.items())),
         "input_type_bytes": dict(sorted(type_bytes.items())),
         "largest_input_items": [
             {"bytes": size, "type": item_type}
@@ -98,6 +125,8 @@ def request_summary(body: bytes) -> dict[str, object]:
         "instructions_chars": len(instructions) if isinstance(instructions, str) else 0,
         "tools_count": len(tools) if isinstance(tools, list) else 0,
         "tools_estimated_tokens": _json_tokens(tools) if isinstance(tools, list) else 0,
+        "tool_declaration_types": dict(sorted(tool_declaration_types.items())),
+        "tool_declaration_names": dict(sorted(tool_declaration_names.items())),
     }
 
 
@@ -399,7 +428,73 @@ def _force_plaintext_collaboration_calls(value) -> int:
     return changed
 
 
-def rewrite_sse_collaboration_calls(data: bytes, final: bool = False) -> tuple[bytes, bytes, int]:
+def _coerce_integral_float_numbers(value):
+    """Convert JSON floats representing integers to JSON integers recursively."""
+    if isinstance(value, float):
+        if math.isfinite(value) and value.is_integer():
+            return int(value), True
+        return value, False
+    if isinstance(value, list):
+        normalized = []
+        changed = False
+        for item in value:
+            child, child_changed = _coerce_integral_float_numbers(item)
+            normalized.append(child)
+            changed = changed or child_changed
+        return normalized, changed
+    if isinstance(value, dict):
+        normalized = {}
+        changed = False
+        for key, child in value.items():
+            normalized_child, child_changed = _coerce_integral_float_numbers(child)
+            normalized[key] = normalized_child
+            changed = changed or child_changed
+        return normalized, changed
+    return value, False
+
+
+def _normalize_function_call_arguments(value) -> int:
+    """Normalize integral float literals in Responses ``function_call`` items."""
+    changed = 0
+    if isinstance(value, list):
+        for item in value:
+            changed += _normalize_function_call_arguments(item)
+        return changed
+    if not isinstance(value, dict):
+        return 0
+
+    if value.get("type") == "function_call":
+        arguments = value.get("arguments")
+        if isinstance(arguments, str):
+            try:
+                parsed = json.loads(arguments)
+            except Exception:
+                parsed = None
+            if parsed is not None:
+                normalized, args_changed = _coerce_integral_float_numbers(parsed)
+                if args_changed:
+                    value["arguments"] = json.dumps(
+                        normalized,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                    changed += 1
+        elif isinstance(arguments, (dict, list)):
+            normalized, args_changed = _coerce_integral_float_numbers(arguments)
+            if args_changed:
+                value["arguments"] = normalized
+                changed += 1
+
+    for child in value.values():
+        changed += _normalize_function_call_arguments(child)
+    return changed
+
+
+def rewrite_sse_collaboration_calls(
+    data: bytes,
+    final: bool = False,
+    normalize_function_args: bool = False,
+) -> tuple[bytes, bytes, int]:
     """Rewrite complete SSE data lines and retain any split trailing line."""
     parts = data.split(b"\n")
     pending = b""
@@ -417,6 +512,8 @@ def rewrite_sse_collaboration_calls(data: bytes, final: bool = False) -> tuple[b
                 event = None
             if event is not None:
                 event_changed = _force_plaintext_collaboration_calls(event)
+                if normalize_function_args:
+                    event_changed += _normalize_function_call_arguments(event)
                 if event_changed:
                     changed += event_changed
                     line = b"data: " + json.dumps(
@@ -428,7 +525,10 @@ def rewrite_sse_collaboration_calls(data: bytes, final: bool = False) -> tuple[b
     return b"".join(output), pending, changed
 
 
-def aggregate_responses_sse(data: bytes) -> tuple[bytes | None, int]:
+def aggregate_responses_sse(
+    data: bytes,
+    normalize_function_args: bool = False,
+) -> tuple[bytes | None, int]:
     """Build one Responses JSON object for callers that requested non-streaming."""
     completed = None
     output_items = {}
@@ -453,6 +553,8 @@ def aggregate_responses_sse(data: bytes) -> tuple[bytes | None, int]:
     if not completed.get("output") and output_items:
         completed["output"] = [item for _, item in sorted(output_items.items())]
     rewritten_calls = _force_plaintext_collaboration_calls(completed)
+    if normalize_function_args:
+        rewritten_calls += _normalize_function_call_arguments(completed)
     return (
         json.dumps(completed, ensure_ascii=False, separators=(",", ":")).encode(),
         rewritten_calls,
@@ -560,10 +662,15 @@ async def handle(req: aiohttp.web.Request, backend: str, session: aiohttp.Client
     enc = req.headers.get("Content-Encoding", "")
     dec = decompress(body, enc)
     caller_stream = True
+    normalize_function_args = False
     if req.method == "POST" and "/responses" in req.path:
         try:
             request_obj = json.loads(dec)
             caller_stream = bool(request_obj.get("stream", False))
+            model = request_obj.get("model")
+            normalize_function_args = (
+                isinstance(model, str) and model.startswith("opencode-go/")
+            )
         except Exception:
             pass
         before = request_summary(dec)
@@ -600,7 +707,10 @@ async def handle(req: aiohttp.web.Request, backend: str, session: aiohttp.Client
             upstream_is_sse = "text/event-stream" in up.headers.get("Content-Type", "").lower()
             if req.method == "POST" and "/responses" in req.path and not caller_stream and upstream_is_sse:
                 upstream_body = await up.read()
-                aggregated, rewritten_calls = aggregate_responses_sse(upstream_body)
+                aggregated, rewritten_calls = aggregate_responses_sse(
+                    upstream_body,
+                    normalize_function_args=normalize_function_args,
+                )
                 if aggregated is not None:
                     headers = {
                         k: v
@@ -615,7 +725,7 @@ async def handle(req: aiohttp.web.Request, backend: str, session: aiohttp.Client
                     }
                     if rewritten_calls:
                         log.info(
-                            "response collaboration compatibility: rewritten_calls=%d",
+                            "response compatibility: normalized_function_args_or_collaboration=%d",
                             rewritten_calls,
                         )
                     log.info("responses transport compatibility: aggregated_sse_bytes=%d", len(upstream_body))
@@ -641,19 +751,29 @@ async def handle(req: aiohttp.web.Request, backend: str, session: aiohttp.Client
             async for chunk in up.content.iter_any():
                 if chunk:
                     if rewrite_collaboration:
-                        out, pending, changed = rewrite_sse_collaboration_calls(pending + chunk)
+                        out, pending, changed = rewrite_sse_collaboration_calls(
+                            pending + chunk,
+                            normalize_function_args=normalize_function_args,
+                        )
                         rewritten_calls += changed
                         if out:
                             await resp.write(out)
                     else:
                         await resp.write(chunk)
             if rewrite_collaboration and pending:
-                out, _, changed = rewrite_sse_collaboration_calls(pending, final=True)
+                out, _, changed = rewrite_sse_collaboration_calls(
+                    pending,
+                    final=True,
+                    normalize_function_args=normalize_function_args,
+                )
                 rewritten_calls += changed
                 if out:
                     await resp.write(out)
             if rewritten_calls:
-                log.info("response collaboration compatibility: rewritten_calls=%d", rewritten_calls)
+                log.info(
+                    "response compatibility: normalized_function_args_or_collaboration=%d",
+                    rewritten_calls,
+                )
             await resp.write_eof()
             return resp
     except Exception as exc:  # noqa: BLE001

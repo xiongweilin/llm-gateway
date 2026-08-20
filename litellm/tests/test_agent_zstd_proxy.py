@@ -110,6 +110,44 @@ def test_sse_rewrites_all_collaboration_calls() -> None:
     assert "encrypted_function_args" not in item
 
 
+def test_opencode_function_call_arguments_coerce_integral_floats() -> None:
+    event = {
+        "type": "response.output_item.done",
+        "item": {
+            "type": "function_call",
+            "name": "exec_command",
+            "arguments": '{"cmd":"Get-Date","yield_time_ms":1000.0,"max_output_tokens":10000.0}',
+            "call_id": "call_1",
+        },
+    }
+    wire = b"data: " + json.dumps(event).encode() + b"\n\n"
+
+    rewritten, pending, count = proxy.rewrite_sse_collaboration_calls(
+        wire,
+        normalize_function_args=True,
+    )
+    assert pending == b""
+    assert count == 1
+    payload = next(line[6:] for line in rewritten.splitlines() if line.startswith(b"data: "))
+    item = json.loads(payload)["item"]
+    assert json.loads(item["arguments"]) == {
+        "cmd": "Get-Date",
+        "yield_time_ms": 1000,
+        "max_output_tokens": 10000,
+    }
+
+
+def test_function_call_argument_normalization_preserves_fractional_values() -> None:
+    value = {
+        "type": "function_call",
+        "name": "tool",
+        "arguments": '{"ratio":1.5,"count":2.0}',
+    }
+
+    assert proxy._normalize_function_call_arguments(value) == 1
+    assert json.loads(value["arguments"]) == {"ratio": 1.5, "count": 2}
+
+
 def test_nonstream_aggregation_recovers_output_items() -> None:
     item_event = {
         "type": "response.output_item.done",
@@ -161,6 +199,39 @@ def test_request_summary_never_contains_prompt_text() -> None:
     ).encode()
     summary = proxy.request_summary(body)
     assert "PRIVATE_CANARY" not in json.dumps(summary)
+
+
+def test_request_summary_records_tool_shapes_without_arguments() -> None:
+    body = json.dumps(
+        {
+            "model": "opencode-go/deepseek-v4-flash",
+            "input": [
+                {"type": "function_call", "name": "exec_command", "arguments": "SECRET"},
+                {"type": "tool_search_call", "arguments": {"query": "SECRET"}},
+            ],
+            "tools": [
+                {"type": "function", "name": "exec_command", "parameters": {"type": "object"}},
+                {
+                    "type": "namespace",
+                    "name": "mcp__demo",
+                    "tools": [{"type": "function", "name": "read_file"}],
+                },
+            ],
+        }
+    ).encode()
+
+    summary = proxy.request_summary(body)
+    assert summary["input_call_names"] == {
+        "function_call:exec_command": 1,
+        "tool_search_call:<none>": 1,
+    }
+    assert summary["tool_declaration_types"] == {"function": 2, "namespace": 1}
+    assert summary["tool_declaration_names"] == {
+        "function:exec_command": 1,
+        "function:read_file": 1,
+        "namespace:mcp__demo": 1,
+    }
+    assert "SECRET" not in json.dumps(summary)
 
 
 def test_tool_schema_normalization_fixes_null_type() -> None:
