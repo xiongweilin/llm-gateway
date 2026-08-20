@@ -52,6 +52,35 @@ def normalize_opencode_tool_schemas(data: dict[str, Any]) -> int:
     return fixed
 
 
+def drop_opencode_custom_tools(data: dict[str, Any]) -> int:
+    """Remove unsupported ``custom`` tool declarations from outbound data."""
+    dropped = 0
+
+    def visit(value: Any) -> None:
+        nonlocal dropped
+        if isinstance(value, list):
+            for child in value:
+                visit(child)
+            return
+        if not isinstance(value, dict):
+            return
+        for key, child in list(value.items()):
+            if key == "tools" and isinstance(child, list):
+                kept = []
+                for item in child:
+                    if isinstance(item, dict) and item.get("type") == "custom":
+                        dropped += 1
+                        continue
+                    kept.append(item)
+                    visit(item)
+                value[key] = kept
+            else:
+                visit(child)
+
+    visit(data)
+    return dropped
+
+
 _original_transform_responses_api_request = OpenAIResponsesAPIConfig.transform_responses_api_request
 
 
@@ -65,10 +94,12 @@ def _transform_responses_api_request_with_opencode_compat(
     litellm_params = kwargs.get("litellm_params")
     api_base = getattr(litellm_params, "api_base", None)
     if isinstance(model, str) and isinstance(api_base, str) and "opencode.ai/zen/go" in api_base:
+        dropped = drop_opencode_custom_tools(data)
         fixed = normalize_opencode_tool_schemas(data)
-        if fixed:
+        if dropped or fixed:
             litellm.verbose_logger.info(
-                "OpenCode Go outbound tool schema compatibility: fixed_required=%d",
+                "OpenCode Go outbound tool compatibility: dropped_custom=%d fixed_required=%d",
+                dropped,
                 fixed,
             )
     return data

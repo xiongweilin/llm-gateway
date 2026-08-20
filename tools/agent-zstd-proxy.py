@@ -269,6 +269,52 @@ def normalize_tool_schemas(body: bytes) -> bytes:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
 
 
+def drop_opencode_custom_tools(body: bytes) -> bytes:
+    """Remove Responses ``custom`` tool declarations unsupported by OpenCode Go.
+
+    This intentionally leaves ``custom_tool_call`` history items untouched;
+    only declarations inside ``tools`` arrays are removed. ChatGPT requests
+    and all other tool types pass through unchanged.
+    """
+    try:
+        obj = json.loads(body)
+    except Exception:
+        return body
+
+    model = obj.get("model")
+    if not isinstance(model, str) or not model.startswith("opencode-go/"):
+        return body
+
+    dropped = 0
+
+    def visit(value) -> None:
+        nonlocal dropped
+        if isinstance(value, list):
+            for item in value:
+                visit(item)
+            return
+        if not isinstance(value, dict):
+            return
+        for key, child in list(value.items()):
+            if key == "tools" and isinstance(child, list):
+                kept = []
+                for item in child:
+                    if isinstance(item, dict) and item.get("type") == "custom":
+                        dropped += 1
+                        continue
+                    kept.append(item)
+                    visit(item)
+                value[key] = kept
+            else:
+                visit(child)
+
+    visit(obj)
+    if not dropped:
+        return body
+    log.info("OpenCode Go custom tool compatibility: dropped=%d", dropped)
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
+
+
 def adapt_collaboration_request(body: bytes) -> bytes:
     """Alias reserved collaboration tools so ChatGPT returns plaintext args."""
     try:
@@ -524,6 +570,7 @@ async def handle(req: aiohttp.web.Request, backend: str, session: aiohttp.Client
         log.info("request summary %s", json.dumps(before, sort_keys=True))
         dec = adapt_collaboration_request(dec)
         dec = normalize_agent_messages(dec)
+        dec = drop_opencode_custom_tools(dec)
         dec = normalize_tool_schemas(dec)
         normalized = request_summary(dec)
         if normalized.get("input_types") != before.get("input_types"):

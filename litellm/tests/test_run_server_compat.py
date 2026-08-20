@@ -7,7 +7,7 @@ LITELLM_DIR = Path(__file__).parents[1]
 if str(LITELLM_DIR) not in sys.path:
     sys.path.insert(0, str(LITELLM_DIR))
 
-from run_server import normalize_opencode_tool_schemas
+from run_server import drop_opencode_custom_tools, normalize_opencode_tool_schemas
 from litellm.llms.openai.responses.transformation import OpenAIResponsesAPIConfig
 
 
@@ -67,6 +67,7 @@ def test_openai_responses_transform_applies_outbound_compatibility() -> None:
         input=[],
         response_api_optional_request_params={
             "tools": [
+                {"type": "custom", "name": "shell"},
                 {
                     "type": "function",
                     "name": "shell",
@@ -81,4 +82,17 @@ def test_openai_responses_transform_applies_outbound_compatibility() -> None:
         headers={},
     )
 
+    assert [tool["type"] for tool in data["tools"]] == ["function"]
     assert data["tools"][0]["parameters"]["required"] == ["limit"]
+
+
+def test_outbound_compatibility_drops_custom_tools() -> None:
+    body = {
+        "tools": [
+            {"type": "custom", "name": "shell"},
+            {"type": "function", "name": "read_file"},
+        ]
+    }
+
+    assert drop_opencode_custom_tools(body) == 1
+    assert [tool["type"] for tool in body["tools"]] == ["function"]

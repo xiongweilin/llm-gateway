@@ -269,6 +269,24 @@ def test_tool_schema_required_normalization_is_scoped_to_opencode() -> None:
     assert proxy.normalize_tool_schemas(raw) is raw
 
 
+def test_custom_tool_declarations_are_removed_only_for_opencode() -> None:
+    request = {
+        "model": "opencode-go/muse-spark-1.2-contributor",
+        "tools": [
+            {"type": "custom", "name": "shell"},
+            {"type": "function", "name": "read_file", "parameters": {"properties": {}}},
+        ],
+        "input": [{"type": "custom_tool_call", "name": "shell"}],
+    }
+    normalized = json.loads(proxy.drop_opencode_custom_tools(json.dumps(request).encode()))
+    assert [tool["type"] for tool in normalized["tools"]] == ["function"]
+    assert normalized["input"][0]["type"] == "custom_tool_call"
+
+    request["model"] = "gpt-5.6-luna"
+    raw = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode()
+    assert proxy.drop_opencode_custom_tools(raw) is raw
+
+
 def test_truncate_input_never_leaves_orphaned_tool_outputs() -> None:
     # Regression: context truncation dropped a function_call but kept its
     # function_call_output, leaving an orphaned tool output behind a kept call.
