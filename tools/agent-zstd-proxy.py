@@ -77,7 +77,12 @@ def request_summary(body: bytes) -> dict[str, object]:
         type_bytes[item_type_name] += item_bytes
         if item_type in TOOL_NAME_INPUT_TYPES:
             name = item.get("name")
-            input_call_names[f"{item_type}:{name if isinstance(name, str) and name else '<none>'}"] += 1
+            namespace = item.get("namespace")
+            if isinstance(namespace, str) and namespace and isinstance(name, str) and name:
+                display_name = f"{namespace}.{name}"
+            else:
+                display_name = name if isinstance(name, str) and name else "<none>"
+            input_call_names[f"{item_type}:{display_name}"] += 1
         largest_items.append((item_bytes, item_type_name))
         if item_type == "agent_message":
             content = item.get("content")
@@ -371,6 +376,11 @@ def adapt_collaboration_request(body: bytes) -> bytes:
             value["name"] = PLAINTEXT_COLLABORATION_NAMESPACE
             aliased_namespaces += 1
         call_name = value.get("name")
+        flat_call_name = _flat_collaboration_tool_name(call_name)
+        if value.get("type") == "function_call" and flat_call_name:
+            value["name"] = flat_call_name
+            value["namespace"] = "collaboration"
+            call_name = flat_call_name
         if (
             value.get("type") == "function_call"
             and value.get("namespace") == "collaboration"
@@ -403,6 +413,16 @@ def adapt_collaboration_request(body: bytes) -> bytes:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
 
 
+def _flat_collaboration_tool_name(name) -> str | None:
+    if not isinstance(name, str):
+        return None
+    for prefix in ("local_collaboration.", "collaboration.", "local_collaboration__", "collaboration__"):
+        tool_name = name.removeprefix(prefix)
+        if tool_name != name and tool_name in COLLABORATION_TOOLS:
+            return tool_name
+    return None
+
+
 def _force_plaintext_collaboration_calls(value) -> int:
     """Mark Codex collaboration calls as plaintext without logging arguments."""
     changed = 0
@@ -413,15 +433,25 @@ def _force_plaintext_collaboration_calls(value) -> int:
     if not isinstance(value, dict):
         return 0
 
-    if value.get("type") == "function_call" and value.get("name") in COLLABORATION_TOOLS:
+    if value.get("type") == "function_call":
+        flat_name = _flat_collaboration_tool_name(value.get("name"))
+        if flat_name:
+            value["name"] = flat_name
+            value["namespace"] = "collaboration"
+        call_name = value.get("name")
         namespace = value.get("namespace")
+    else:
+        call_name = None
+        namespace = None
+    if call_name in COLLABORATION_TOOLS:
         if namespace == PLAINTEXT_COLLABORATION_NAMESPACE:
             value["namespace"] = "collaboration"
-            if value.get("name") in PLAINTEXT_COLLABORATION_TOOLS:
+            if call_name in PLAINTEXT_COLLABORATION_TOOLS:
                 value["encrypted_function_args"] = []
             changed += 1
         elif namespace == "collaboration" and value.get("encrypted_function_args") != []:
-            value["encrypted_function_args"] = []
+            if call_name in PLAINTEXT_COLLABORATION_TOOLS:
+                value["encrypted_function_args"] = []
             changed += 1
     for child in value.values():
         changed += _force_plaintext_collaboration_calls(child)

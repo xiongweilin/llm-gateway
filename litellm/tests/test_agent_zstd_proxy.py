@@ -60,6 +60,26 @@ def test_collaboration_request_uses_plaintext_alias() -> None:
     assert "encrypted_function_args" not in adapted["input"][1]
 
 
+def test_collaboration_request_repairs_flattened_call_name() -> None:
+    request = {
+        "model": "opencode-go/muse-spark-1.2-contributor",
+        "input": [
+            {
+                "type": "function_call",
+                "name": "local_collaboration.spawn_agent",
+                "arguments": "{}",
+                "call_id": "call_flat",
+            }
+        ],
+    }
+
+    adapted = json.loads(proxy.adapt_collaboration_request(json.dumps(request).encode()))
+    call = adapted["input"][0]
+    assert call["namespace"] == "local_collaboration"
+    assert call["name"] == "spawn_agent"
+
+
+
 def test_agent_message_conversion_is_scoped_to_opencode_plaintext() -> None:
     plain = {
         "model": "opencode-go/deepseek-v4-flash",
@@ -108,6 +128,28 @@ def test_sse_rewrites_all_collaboration_calls() -> None:
     item = json.loads(payload)["item"]
     assert item["namespace"] == "collaboration"
     assert "encrypted_function_args" not in item
+
+
+def test_sse_rewrites_flattened_collaboration_call_name() -> None:
+    event = {
+        "type": "response.output_item.done",
+        "item": {
+            "type": "function_call",
+            "name": "local_collaboration.spawn_agent",
+            "arguments": "{}",
+            "call_id": "call_flat",
+        },
+    }
+    wire = b"data: " + json.dumps(event).encode() + b"\n\n"
+
+    rewritten, pending, count = proxy.rewrite_sse_collaboration_calls(wire)
+    assert pending == b""
+    assert count == 1
+    payload = next(line[6:] for line in rewritten.splitlines() if line.startswith(b"data: "))
+    item = json.loads(payload)["item"]
+    assert item["namespace"] == "collaboration"
+    assert item["name"] == "spawn_agent"
+    assert item["encrypted_function_args"] == []
 
 
 def test_opencode_function_call_arguments_coerce_integral_floats() -> None:
