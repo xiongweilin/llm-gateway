@@ -1,6 +1,6 @@
 # 启动 Codex 模型路由桥接：
-#   Codex -> zstd 解压代理(127.0.0.1:4000)
-#         -> LiteLLM(127.0.0.1:4001)
+#   Codex -> zstd 解压代理(127.0.0.1:4100)
+#         -> LiteLLM(127.0.0.1:4101)
 #         -> opencode-go
 #
 # 用法:
@@ -246,8 +246,8 @@ if (-not (Test-Path $ProxyScript)) {
 # 3. 清理本桥遗留监听
 # ------------------------------------------------------------
 
-Stop-OwnPortOwner -Port 4000 -Tag "zstd 代理(4000)"
-Stop-OwnPortOwner -Port 4001 -Tag "LiteLLM(4001)"
+Stop-OwnPortOwner -Port 4100 -Tag "zstd 代理(4100)"
+Stop-OwnPortOwner -Port 4101 -Tag "LiteLLM(4101)"
 
 Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
 Remove-Item $ProxyPidFile -Force -ErrorAction SilentlyContinue
@@ -264,7 +264,7 @@ Remove-Item $ProxyErr -Force -ErrorAction SilentlyContinue
 
 
 # ------------------------------------------------------------
-# 5. 启动 LiteLLM :4001
+# 5. 启动 LiteLLM :4101
 # ------------------------------------------------------------
 
 Push-Location $Root
@@ -284,7 +284,7 @@ try {
                 $ServerEntry,
                 "--config", $Cfg,
                 "--host", "127.0.0.1",
-                "--port", "4001"
+                "--port", "4101"
             ) `
             -RedirectStandardOutput $LogOut `
             -RedirectStandardError $LogErr `
@@ -305,7 +305,7 @@ try {
                 "litellm",
                 "--config", $Cfg,
                 "--host", "127.0.0.1",
-                "--port", "4001"
+                "--port", "4101"
             ) `
             -RedirectStandardOutput $LogOut `
             -RedirectStandardError $LogErr `
@@ -319,11 +319,11 @@ finally {
 
 $proc.Id | Set-Content $PidFile
 
-Write-Host "LiteLLM 启动命令已执行 pid=$($proc.Id)（127.0.0.1:4001）"
+Write-Host "LiteLLM 启动命令已执行 pid=$($proc.Id)（127.0.0.1:4101）"
 
 
 # ------------------------------------------------------------
-# 6. 等待 LiteLLM :4001
+# 6. 等待 LiteLLM :4101
 # ------------------------------------------------------------
 
 $ready = $false
@@ -332,7 +332,7 @@ for ($i = 0; $i -lt 90; $i++) {
 
     try {
         $null = Invoke-RestMethod `
-            -Uri "http://127.0.0.1:4001/health/liveliness" `
+            -Uri "http://127.0.0.1:4101/health/liveliness" `
             -TimeoutSec 2
 
         $ready = $true
@@ -355,37 +355,37 @@ if (-not $ready) {
         -Path $LogOut `
         -Lines 20
 
-    Stop-BridgePort -Port 4001
+    Stop-BridgePort -Port 4101
 
     Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
 
     Write-Error "LiteLLM 未在 90 秒内就绪"
 }
 
-$liteConn = Get-PortOwner -Port 4001
+$liteConn = Get-PortOwner -Port 4101
 
 if (-not $liteConn) {
-    Write-Error "LiteLLM health check 成功，但 4001 没有监听进程"
+    Write-Error "LiteLLM health check 成功，但 4101 没有监听进程"
 }
 
 $litePid = $liteConn.OwningProcess
 
-# pidfile 更新成真正监听 4001 的 PID。
+# pidfile 更新成真正监听 4101 的 PID。
 $litePid | Set-Content $PidFile
 
-Write-Host "LiteLLM codex 网关就绪（127.0.0.1:4001，pid=$litePid）"
+Write-Host "LiteLLM codex 网关就绪（127.0.0.1:4101，pid=$litePid）"
 
 
 # ------------------------------------------------------------
-# 7. 启动 zstd proxy :4000 -> :4001
+# 7. 启动 zstd proxy :4100 -> :4101
 # ------------------------------------------------------------
 
 $proxy = Start-Process `
     -FilePath $VenvPython `
     -ArgumentList @(
         $ProxyScript,
-        "4000",
-        "http://127.0.0.1:4001"
+        "4100",
+        "http://127.0.0.1:4101"
     ) `
     -RedirectStandardOutput $ProxyOut `
     -RedirectStandardError $ProxyErr `
@@ -398,7 +398,7 @@ Write-Host "zstd 代理启动命令已执行 pid=$($proxy.Id)"
 
 
 # ------------------------------------------------------------
-# 8. 等待 zstd proxy :4000
+# 8. 等待 zstd proxy :4100
 # ------------------------------------------------------------
 
 $proxyReady = $false
@@ -407,7 +407,7 @@ for ($i = 0; $i -lt 40; $i++) {
 
     try {
         $null = Invoke-WebRequest `
-            -Uri "http://127.0.0.1:4000/health/liveliness" `
+            -Uri "http://127.0.0.1:4100/health/liveliness" `
             -TimeoutSec 2 `
             -UseBasicParsing
 
@@ -430,7 +430,7 @@ for ($i = 0; $i -lt 40; $i++) {
                 -Path $ProxyOut `
                 -Lines 20
 
-            Stop-BridgePort -Port 4001
+            Stop-BridgePort -Port 4101
 
             Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
             Remove-Item $ProxyPidFile -Force -ErrorAction SilentlyContinue
@@ -454,8 +454,8 @@ if (-not $proxyReady) {
         -Path $ProxyOut `
         -Lines 20
 
-    Stop-BridgePort -Port 4000
-    Stop-BridgePort -Port 4001
+    Stop-BridgePort -Port 4100
+    Stop-BridgePort -Port 4101
 
     Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
     Remove-Item $ProxyPidFile -Force -ErrorAction SilentlyContinue
@@ -463,29 +463,29 @@ if (-not $proxyReady) {
     Write-Error "zstd 代理未在 20 秒内就绪"
 }
 
-$proxyConn = Get-PortOwner -Port 4000
+$proxyConn = Get-PortOwner -Port 4100
 
 if (-not $proxyConn) {
-    Write-Error "zstd proxy health check 成功，但 4000 没有监听进程"
+    Write-Error "zstd proxy health check 成功，但 4100 没有监听进程"
 }
 
 $proxyPid = $proxyConn.OwningProcess
 
-# 保存真正监听 4000 的 PID。
+# 保存真正监听 4100 的 PID。
 $proxyPid | Set-Content $ProxyPidFile
 
-Write-Host "zstd 解压代理就绪（127.0.0.1:4000 -> 4001，pid=$proxyPid）"
+Write-Host "zstd 解压代理就绪（127.0.0.1:4100 -> 4101，pid=$proxyPid）"
 
 
 # ------------------------------------------------------------
-# 9. 验证 :4000 -> :4001
+# 9. 验证 :4100 -> :4101
 # ------------------------------------------------------------
 
 if (-not $NoVerify) {
 
     try {
         $r = Invoke-RestMethod `
-            -Uri "http://127.0.0.1:4000/v1/models" `
+            -Uri "http://127.0.0.1:4100/v1/models" `
             -TimeoutSec 30
 
         Write-Host "验证通过：代理 -> LiteLLM -> opencode-go models=$($r.data.Count)"
@@ -504,8 +504,8 @@ if (-not $NoVerify) {
             -Path $ProxyErr `
             -Lines 30
 
-        Stop-BridgePort -Port 4000
-        Stop-BridgePort -Port 4001
+        Stop-BridgePort -Port 4100
+        Stop-BridgePort -Port 4101
 
         Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
         Remove-Item $ProxyPidFile -Force -ErrorAction SilentlyContinue
@@ -521,8 +521,8 @@ if (-not $NoVerify) {
 
 Write-Host ""
 Write-Host "Codex 网桥启动完成："
-Write-Host "  Codex      -> http://127.0.0.1:4000"
-Write-Host "  zstd proxy -> http://127.0.0.1:4001"
+Write-Host "  Codex      -> http://127.0.0.1:4100"
+Write-Host "  zstd proxy -> http://127.0.0.1:4101"
 Write-Host "  LiteLLM    -> opencode-go"
 Write-Host ""
 

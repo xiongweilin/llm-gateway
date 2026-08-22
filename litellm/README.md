@@ -7,7 +7,7 @@
 
 - 独立 uv 环境：`uv.lock` 锁定全部依赖，LiteLLM 固定 `==1.96.0`。
 - 无数据库运行：不设置 `database_url`，`store_model_in_db: false`，配置只来自 `config.yaml`。
-- 仅绑定 loopback（默认 `127.0.0.1:4000`），master key 由环境变量注入，配置无明文密钥。
+- 仅绑定 loopback（默认 `127.0.0.1:4100`），master key 由环境变量注入，配置无明文密钥。
 - 关闭 response cache / semantic cache / 外部日志 callbacks，不记录请求/响应正文。
 - 自带 fake provider 与 conformance 测试（消息顺序、稳定前缀、cache usage、streaming、取消、认证、绑定）。
 
@@ -47,17 +47,17 @@ $env:FAKE_PROVIDER_API_KEY  = "sk-fake-canary-5678"        # conformance 合成 
 ## 启动网关
 
 ```powershell
-uv run litellm --config config.yaml --host 127.0.0.1 --port 4000
+uv run litellm --config config.yaml --host 127.0.0.1 --port 4100
 ```
 
 说明：
 
 - `--host 127.0.0.1` 是标准运行方式（仅本机访问）。litellm 1.96.0 的 CLI 默认 host 是 `0.0.0.0`，切勿在未加 `--host 127.0.0.1` 时暴露到网络。
-- 健康检查：`http://127.0.0.1:4000/health/liveliness`。
+- 健康检查：`http://127.0.0.1:4100/health/liveliness`。
 - 调用示例（模型名可用 `fake-responses` 或别名 `fake-gw`）：
 
 ```powershell
-curl.exe http://127.0.0.1:4000/v1/responses `
+curl.exe http://127.0.0.1:4100/v1/responses `
   -H "Authorization: Bearer $env:LITELLM_MASTER_KEY" `
   -H "Content-Type: application/json" `
   -d '{\"model\":\"fake-responses\",\"input\":\"hello\"}'
@@ -92,8 +92,8 @@ litellm/
 ### Codex 模型路由桥接（config.agent.yaml + scripts/start-agent-gateway.ps1）
 
 - 作用：Codex 统一经本项目 LiteLLM 路由到 ChatGPT 账号或 OpenCode Go。
-- 拓扑：Codex → zstd 解压代理(127.0.0.1:4000, `tools/agent-zstd-proxy.py`) →
-  LiteLLM(127.0.0.1:4001, `config.agent.yaml`) → 原生 `/responses` 上游。
+- 拓扑：Codex → zstd 解压代理(127.0.0.1:4100, `tools/agent-zstd-proxy.py`) →
+  LiteLLM(127.0.0.1:4101, `config.agent.yaml`) → 原生 `/responses` 上游。
 - 账号路由：`gpt-5.6-luna` 经 `chatgpt/` provider 走 OpenAI 账号（复用
   `~/.codex/auth.json` 登录态，无需 API key），默认 base
   `https://chatgpt.com/backend-api/codex`，消耗账号余额。
@@ -124,5 +124,5 @@ litellm/
 - 密钥：仅经 `OPENCODEGO_API_KEY` 环境变量（或
   `%USERPROFILE%\.codex\litellm-opencode-go.env`，ACL 已限制仅当前用户），
   不写入任何配置/日志/仓库。
-- `scripts/start-agent-gateway.ps1` 会替换 4000/4001 监听；不要在仍有活动 Codex
+- `scripts/start-agent-gateway.ps1` 会替换 4100/4101 监听；不要在仍有活动 Codex
   请求时执行。

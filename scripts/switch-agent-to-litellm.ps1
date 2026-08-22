@@ -1,4 +1,4 @@
-# 一次性切换 Codex 模型路由：默认路由 → LiteLLM(4000)。
+# 一次性切换 Codex 模型路由：默认路由 → LiteLLM(4100)。
 # 保护措施：切换前备份 config.toml；失败自动回滚；全部可逆。
 # 用法: pwsh -File scripts/switch-agent-to-litellm.ps1 [-Rollback]
 param(
@@ -75,22 +75,22 @@ if ($Rollback) {
 
 $before = Get-BaseUrl
 Write-Host "切换前 openai_base_url = $before"
-if ($before -eq "http://127.0.0.1:4000/v1") {
+if ($before -eq "http://127.0.0.1:4100/v1") {
     Write-Host "已处于 LiteLLM 路由，无需切换"
     exit 0
 }
 
 # 1. 前置检查：LiteLLM 已运行且可达
 try {
-    $r = Invoke-RestMethod "http://127.0.0.1:4000/health/liveliness" -TimeoutSec 3
+    $r = Invoke-RestMethod "http://127.0.0.1:4100/health/liveliness" -TimeoutSec 3
 } catch {
-    Write-Error "LiteLLM(127.0.0.1:4000) 未运行——请先执行 start-agent-gateway.ps1；未改动任何配置"
+    Write-Error "LiteLLM(127.0.0.1:4100) 未运行——请先执行 start-agent-gateway.ps1；未改动任何配置"
 }
 
 # 2. 备份 + 切换
 Copy-Item $Cfg $Bak -Force
 Write-Host "已备份 -> $Bak"
-Set-Route "http://127.0.0.1:4000/v1"
+Set-Route "http://127.0.0.1:4100/v1"
 
 # 3. 验证（HTTP 直连网关的最小请求；不依赖 codex CLI 认证状态）
 $ok = $false
@@ -102,7 +102,7 @@ try {
         max_output_tokens = 32
     } | ConvertTo-Json -Depth 5
     $resp = Invoke-RestMethod -Method Post `
-        -Uri "http://127.0.0.1:4000/v1/responses" `
+        -Uri "http://127.0.0.1:4100/v1/responses" `
         -ContentType "application/json" `
         -Body $req `
         -TimeoutSec 90

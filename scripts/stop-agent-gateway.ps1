@@ -1,4 +1,4 @@
-# 停止 Codex 模型路由桥接（LiteLLM 127.0.0.1:4001 + zstd 代理 127.0.0.1:4000）。
+# 停止 Codex 模型路由桥接（LiteLLM 127.0.0.1:4101 + zstd 代理 127.0.0.1:4100）。
 # 按端口杀进程树（uv 包装 + litellm python 子进程），并清理 pidfile。
 $ErrorActionPreference = "Continue"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
@@ -20,8 +20,8 @@ function Stop-PortListeners {
     if (-not $killed) { Write-Host "$Tag：无监听进程" }
 }
 
-Stop-PortListeners -Port 4001 -Tag "LiteLLM(4001)"
-Stop-PortListeners -Port 4000 -Tag "zstd 代理(4000)"
+Stop-PortListeners -Port 4101 -Tag "LiteLLM(4101)"
+Stop-PortListeners -Port 4100 -Tag "zstd 代理(4100)"
 
 # 兜底：pidfile 中仍存活的进程（端口已释放但进程未退时）
 foreach ($pf in @($PidFile, $ProxyPidFile)) {
@@ -40,7 +40,7 @@ foreach ($pf in @($PidFile, $ProxyPidFile)) {
 
 Start-Sleep -Seconds 2
 $still = @()
-foreach ($p in 4000, 4001) {
+foreach ($p in 4100, 4101) {
     if ((Test-NetConnection 127.0.0.1 -Port $p -WarningAction SilentlyContinue).TcpTestSucceeded) { $still += $p }
 }
 if ($still) { Write-Host "警告：端口 $($still -join ',') 仍有监听（可能被其他程序占用，未强杀）" } else { Write-Host "网桥已全部停止" }

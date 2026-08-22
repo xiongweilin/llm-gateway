@@ -2,8 +2,8 @@
 
 背景：codex CLI/桌面端把 /v1/responses 请求体以 `Content-Encoding: zstd`
 发送；LiteLLM(FastAPI) 不解压请求体，导致 model 字段解析失败（400
-model=None）。本代理在 127.0.0.1:4000 收请求，zstd 解压后转发到后端
-LiteLLM（默认 127.0.0.1:4001），并流式回传 SSE 响应。
+model=None）。本代理在 127.0.0.1:4100 收请求，zstd 解压后转发到后端
+LiteLLM（默认 127.0.0.1:4101），并流式回传 SSE 响应。
 
 安全：仅绑定 loopback；不解析/不记录请求与响应内容；不含任何密钥。
 """
@@ -833,8 +833,8 @@ async def handle(req: aiohttp.web.Request, backend: str, session: aiohttp.Client
 
 
 async def main() -> None:
-    listen_port = int(sys.argv[1]) if len(sys.argv) > 1 else 4000
-    backend = sys.argv[2] if len(sys.argv) > 2 else "http://127.0.0.1:4001"
+    listen_port = int(sys.argv[1]) if len(sys.argv) > 1 else 4100
+    backend = sys.argv[2] if len(sys.argv) > 2 else "http://127.0.0.1:4101"
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     # 桌面端打开会话会发送完整历史（+工具 schema），超过 aiohttp 默认
     # 1MB 请求体上限会返回 413；调大至 128MB。
