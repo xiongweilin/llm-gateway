@@ -3,7 +3,7 @@ name = "litellm-gateway"
 version = "0.1.0"
 description = "独立 LiteLLM 模型网关组件（项目内独立 uv 环境，无数据库）"
 authors = [
-    { name = "ratiolin", email = "metratio@gmail.com" }
+    { name = "xiongweilin", email = "metratio@gmail.com" }
 ]
 requires-python = ">=3.11"
 dependencies = [
