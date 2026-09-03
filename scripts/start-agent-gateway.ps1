@@ -1,7 +1,7 @@
 # 启动 Codex 模型路由桥接：
 #   Codex -> zstd 解压代理(127.0.0.1:4100)
 #         -> LiteLLM(127.0.0.1:4101)
-#         -> opencode-go
+#         -> ChatGPT GPT family
 #
 # 用法:
 #   pwsh -NoProfile -File scripts\start-agent-gateway.ps1
@@ -38,6 +38,10 @@ $VenvPython = Join-Path $Root "litellm\.venv\Scripts\python.exe"
 $VenvLiteLLM = Join-Path $Root "litellm\.venv\Scripts\litellm.exe"
 $ProxyScript = Join-Path $Root "tools\agent-zstd-proxy.py"
 $ServerEntry = Join-Path $Root "litellm\run_server.py"
+$ModelSyncScript = Join-Path $Root "scripts\sync-agent-gpt-models.ps1"
+$ModelCatalog = Join-Path $env:USERPROFILE ".codex\models.json"
+$FilteredModelCatalog = Join-Path $env:USERPROFILE ".codex\models.filtered.json"
+$ConfigTemplate = Join-Path $Root "litellm\config.agent.template.yaml"
 
 
 # ------------------------------------------------------------
@@ -190,15 +194,7 @@ if (-not $env:OPENCODEGO_API_KEY) {
 }
 
 if (-not $env:OPENCODEGO_API_KEY) {
-    Write-Error @"
-未找到 OPENCODEGO_API_KEY。
-
-请：
-1. 设置 `$env:OPENCODEGO_API_KEY
-或
-2. 写入：
-   $env:USERPROFILE\.codex\litellm-opencode-go.env
-"@
+    Write-Warning "未找到 OPENCODEGO_API_KEY；当前 GPT-only 配置不需要该变量。"
 }
 
 # DeepSeek 官方 API key（可选；DeepSeek 路由需要）。
@@ -240,6 +236,21 @@ if (-not (Test-Path $VenvPython)) {
 if (-not (Test-Path $ProxyScript)) {
     Write-Error "zstd proxy 脚本不存在: $ProxyScript"
 }
+
+if (-not (Test-Path $ModelSyncScript)) {
+    Write-Error "GPT 模型同步脚本不存在: $ModelSyncScript"
+}
+
+if (-not (Test-Path $ConfigTemplate)) {
+    Write-Error "LiteLLM 配置模板不存在: $ConfigTemplate"
+}
+
+# 在停止旧网关前完成配置生成：生成失败时保留当前运行实例，避免无配置停机。
+& $ModelSyncScript `
+    -CatalogPath $ModelCatalog `
+    -CodexCatalogOutputPath $FilteredModelCatalog `
+    -TemplatePath $ConfigTemplate `
+    -OutputPath $Cfg
 
 
 # ------------------------------------------------------------
@@ -488,7 +499,7 @@ if (-not $NoVerify) {
             -Uri "http://127.0.0.1:4100/v1/models" `
             -TimeoutSec 30
 
-        Write-Host "验证通过：代理 -> LiteLLM -> opencode-go models=$($r.data.Count)"
+        Write-Host "验证通过：代理 -> LiteLLM -> GPT models=$($r.data.Count)"
     }
     catch {
 
@@ -523,7 +534,7 @@ Write-Host ""
 Write-Host "Codex 网桥启动完成："
 Write-Host "  Codex      -> http://127.0.0.1:4100"
 Write-Host "  zstd proxy -> http://127.0.0.1:4101"
-Write-Host "  LiteLLM    -> opencode-go"
+Write-Host "  LiteLLM    -> ChatGPT GPT family"
 Write-Host ""
 
 exit 0

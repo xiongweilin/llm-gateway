@@ -91,19 +91,23 @@ litellm/
 
 ### Codex 模型路由桥接（config.agent.yaml + scripts/start-agent-gateway.ps1）
 
-- 作用：Codex 统一经本项目 LiteLLM 路由到 ChatGPT 账号或 OpenCode Go。
+- 作用：Codex 统一经本项目 LiteLLM 路由到 ChatGPT 账号。
 - 拓扑：Codex → zstd 解压代理(127.0.0.1:4100, `tools/agent-zstd-proxy.py`) →
   LiteLLM(127.0.0.1:4101, `config.agent.yaml`) → 原生 `/responses` 上游。
-- 账号路由：`gpt-5.6-luna` 经 `chatgpt/` provider 走 OpenAI 账号（复用
+- 账号路由：GPT family 经 `chatgpt/` provider 走 OpenAI 账号（复用
   `~/.codex/auth.json` 登录态，无需 API key），默认 base
   `https://chatgpt.com/backend-api/codex`，消耗账号余额。
-- OpenCode Go 路由声明为 `openai/<model>`，使 LiteLLM 直通
-  `https://opencode.ai/zen/go/v1/responses`；不要改成 Responses-to-Chat bridge。
-- 模型来源（四模型，与 Codex 目录一致）：OpenAI 账号 `gpt-5.6-luna`
-  （`chatgpt/*`，消耗账号余额）、opencode-go `opencode-go/deepseek-v4-flash`、
-  DeepSeek 官方 `deepseek-v4-flash` 与 `deepseek-v4-pro`（裸名；v4-pro 已
-  开放，GA 版 DeepSeek-V4-Pro-0813，2026-08-12 上线）。Codex 模型目录：
-  `~/.codex/models.json`（三来源四模型）。
+- 模型列表由 `scripts/sync-agent-gpt-models.ps1` 在网关启动前生成：始终显示
+  `gpt-5.6-sol` 与 `gpt-5.6-luna`，并追加
+  `%USERPROFILE%\.codex\models.json` 中所有 GPT-5.6 及更新系列模型；旧 GPT 和其他
+  provider 不进入 LiteLLM `/v1/models`，也不进入 Codex 的
+  `%USERPROFILE%\.codex\models.filtered.json`。Codex 的
+  `model_catalog_json` 已指向这个过滤副本，因此模型目录更新后，下次网关启动会
+  自动刷新下一次启动时的 Codex 列表，不需要手工编辑 YAML 或 JSON；Codex Desktop/CLI
+  本身需要完全退出并重新启动，才会重新读取 `config.toml` 和该过滤目录。
+- 运行中的网关不会因模型目录变化而后台重启；这样避免中断活动 Codex 请求。
+  若要立即应用新列表，请在当前请求结束后运行
+  `scripts/start-agent-gateway.ps1`。
 - 为什么需要代理：codex 请求体带 `Content-Encoding: zstd`，LiteLLM/FastAPI
   不解压导致 model=None（400）；aiohttp 3.14 会自动解压 zstd，代理据此仅对
   仍以 zstd magic 开头的 body 手动解压。
@@ -111,9 +115,8 @@ litellm/
   1.96.0 每请求重复注入的 7.5 KB 旧 Codex 提示，不降低模型的 1M 窗口。
 - 子智能体修复：代理临时别名化 `collaboration` 工具以关闭跨 provider 不可解密
   的消息参数，再把 `agent_message` 转成 OpenCode Go 能读取的标准 user message。
-- 工具 schema 规范化：桌面端 automation 工具（如 `automation_update`）可能带
-  `type: null` 的 `parameters`/`input_schema`；OpenCode Go 严格校验会整体拒绝
-  请求，代理在转发前补上 `type: "object"`。
+- 旧 OpenCode Go 工具兼容代码仍保留在代理中，但当前 GPT-only 配置不会启用该路由；
+  因而 OpenCode Go 的 schema 变换不会影响当前 `/v1/models`。
 - 超长会话截断：超过 950k token 预算时代理截断最旧条目，并按 `call_id` 对账
   工具调用/输出配对，删除被截断调用遗留的孤儿 `function_call_output`，避免
   OpenCode Go 以 "No tool call found for tool output" 整体拒绝请求。
@@ -121,8 +124,8 @@ litellm/
   `response.output_item.done`/`response.completed`，返回标准 Responses JSON。
 - 日志只记录请求大小、item 类型/计数、工具数量和转换计数，不记录正文或参数。
 - zstandard 依赖已加入 pyproject/uv.lock；`uv sync --locked` 可复现。
-- 密钥：仅经 `OPENCODEGO_API_KEY` 环境变量（或
-  `%USERPROFILE%\.codex\litellm-opencode-go.env`，ACL 已限制仅当前用户），
-  不写入任何配置/日志/仓库。
+- 当前 GPT-only 路由复用 `~/.codex/auth.json` 登录态，不需要 provider API key；
+  旧 OpenCode Go / DeepSeek 路由若恢复，仍只能经受限环境变量注入，不能写入任何
+  配置、日志或仓库。
 - `scripts/start-agent-gateway.ps1` 会替换 4100/4101 监听；不要在仍有活动 Codex
   请求时执行。
