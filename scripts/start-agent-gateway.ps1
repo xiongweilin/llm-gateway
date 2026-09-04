@@ -39,8 +39,7 @@ $VenvLiteLLM = Join-Path $Root "litellm\.venv\Scripts\litellm.exe"
 $ProxyScript = Join-Path $Root "tools\agent-zstd-proxy.py"
 $ServerEntry = Join-Path $Root "litellm\run_server.py"
 $ModelSyncScript = Join-Path $Root "scripts\sync-agent-gpt-models.ps1"
-$ModelCatalog = Join-Path $env:USERPROFILE ".codex\models.json"
-$FilteredModelCatalog = Join-Path $env:USERPROFILE ".codex\models.filtered.json"
+$ModelCatalog = Join-Path $env:USERPROFILE ".codex\models_cache.json"
 $ConfigTemplate = Join-Path $Root "litellm\config.agent.template.yaml"
 
 
@@ -96,9 +95,18 @@ function Stop-OwnPortOwner {
         $cmd -match 'agent-zstd-proxy\.py' -or
         $cmd -match 'gateway[\\/]+litellm'
     ) {
-        Write-Host "$Tag 端口被本桥残留进程占用，清理 pid=$ownerPid"
+        $killPid = $ownerPid
+        if ($ownerProc) {
+            $parentProc = Get-CimInstance Win32_Process `
+                -Filter "ProcessId=$($ownerProc.ParentProcessId)" `
+                -ErrorAction SilentlyContinue
+            if ($parentProc -and [string]$parentProc.CommandLine -match [regex]::Escape($Root)) {
+                $killPid = [int]$parentProc.ProcessId
+            }
+        }
+        Write-Host "$Tag 端口被本桥残留进程占用，清理进程树 root=$killPid listener=$ownerPid"
 
-        & taskkill /PID $ownerPid /T /F 2>$null | Out-Null
+        & taskkill /PID $killPid /T /F 2>$null | Out-Null
 
         Start-Sleep -Milliseconds 500
 
@@ -248,7 +256,6 @@ if (-not (Test-Path $ConfigTemplate)) {
 # 在停止旧网关前完成配置生成：生成失败时保留当前运行实例，避免无配置停机。
 & $ModelSyncScript `
     -CatalogPath $ModelCatalog `
-    -CodexCatalogOutputPath $FilteredModelCatalog `
     -TemplatePath $ConfigTemplate `
     -OutputPath $Cfg
 
