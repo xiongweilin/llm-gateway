@@ -2,7 +2,6 @@ import importlib.util
 import json
 from pathlib import Path
 
-
 PROXY_PATH = Path(__file__).parents[2] / "tools" / "agent-zstd-proxy.py"
 SPEC = importlib.util.spec_from_file_location("agent_zstd_proxy", PROXY_PATH)
 assert SPEC and SPEC.loader
@@ -125,6 +124,20 @@ def test_agent_message_conversion_is_scoped_to_opencode_plaintext() -> None:
     chatgpt = json.loads(json.dumps(plain))
     chatgpt["model"] = "gpt-5.6-luna"
     assert json.loads(proxy.normalize_agent_messages(json.dumps(chatgpt).encode())) == chatgpt
+
+
+def test_scalar_responses_input_is_normalized_for_chatgpt_backend() -> None:
+    request = {"model": "gpt-5.6-luna", "input": "diagnose this alert"}
+
+    normalized = json.loads(proxy.normalize_scalar_responses_input(json.dumps(request).encode()))
+
+    assert normalized["input"] == [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "diagnose this alert"}],
+        }
+    ]
 
 
 def test_sse_rewrites_all_collaboration_calls() -> None:

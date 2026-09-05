@@ -8,11 +8,11 @@ LiteLLM（默认 127.0.0.1:4101），并流式回传 SSE 响应。
 安全：仅绑定 loopback；不解析/不记录请求与响应内容；不含任何密钥。
 """
 import asyncio
-from collections import Counter
 import json
 import logging
 import math
 import sys
+from collections import Counter
 
 import aiohttp
 import aiohttp.web
@@ -686,6 +686,31 @@ def decompress(body: bytes, encoding: str) -> bytes:
     return body
 
 
+def normalize_scalar_responses_input(body: bytes) -> bytes:
+    """Convert Codex's scalar Responses input to the gateway's list shape.
+
+    The ChatGPT Codex backend rejects a scalar ``input`` with ``Input must be a
+    list`` even though the public Responses contract permits a string. Keep
+    the conversion content-preserving and avoid logging the prompt.
+    """
+    try:
+        obj = json.loads(body)
+    except json.JSONDecodeError:
+        return body
+    value = obj.get("input")
+    if not isinstance(value, str):
+        return body
+    obj["input"] = [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": value}],
+        }
+    ]
+    log.info("Responses compatibility: normalized scalar input to one user message")
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
+
+
 async def handle(req: aiohttp.web.Request, backend: str, session: aiohttp.ClientSession):
     # Codex 对 /v1/responses 总是先尝试 WebSocket 传输；本代理对 WS 返回
     # 426 UPGRADE_REQUIRED，Codex 据此干净回退到 HTTP（FallbackToHttp）。
@@ -726,6 +751,7 @@ async def handle(req: aiohttp.web.Request, backend: str, session: aiohttp.Client
             pass
         before = request_summary(dec)
         log.info("request summary %s", json.dumps(before, sort_keys=True))
+        dec = normalize_scalar_responses_input(dec)
         dec = adapt_collaboration_request(dec)
         dec = normalize_agent_messages(dec)
         dec = drop_opencode_custom_tools(dec)
@@ -753,7 +779,10 @@ async def handle(req: aiohttp.web.Request, backend: str, session: aiohttp.Client
     try:
         async with session.request(
             req.method, url, data=dec, headers=headers,
-            compress=False, timeout=aiohttp.ClientTimeout(total=600),
+            # A Codex CLI session can make multiple Responses turns. The
+            # proxy must outlive the control-plane session budget so it does
+            # not cancel a still-progressing upstream request first.
+            compress=False, timeout=aiohttp.ClientTimeout(total=1200),
         ) as up:
             upstream_is_sse = "text/event-stream" in up.headers.get("Content-Type", "").lower()
             if req.method == "POST" and "/responses" in req.path and not caller_stream and upstream_is_sse:

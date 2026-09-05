@@ -15,19 +15,19 @@ model_list:
       mode: responses
     litellm_params:
       model: 'chatgpt/gpt-5.6-sol'
-      timeout: 120
+      timeout: 900
   - model_name: 'gpt-5.6-terra'
     model_info:
       mode: responses
     litellm_params:
       model: 'chatgpt/gpt-5.6-terra'
-      timeout: 120
+      timeout: 900
   - model_name: 'gpt-5.6-luna'
     model_info:
       mode: responses
     litellm_params:
       model: 'chatgpt/gpt-5.6-luna'
-      timeout: 120
+      timeout: 900
   # END GENERATED GPT MODELS
 litellm_settings:
   cache: false

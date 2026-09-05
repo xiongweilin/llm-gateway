@@ -346,7 +346,7 @@ function New-GeneratedModelBlock {
         [void]$lines.Add("      mode: responses")
         [void]$lines.Add("    litellm_params:")
         [void]$lines.Add("      model: 'chatgpt/$model'")
-        [void]$lines.Add("      timeout: 120")
+        [void]$lines.Add("      timeout: 900")
     }
     return $lines.ToArray()
 }
