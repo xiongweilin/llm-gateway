@@ -1,11 +1,9 @@
-# 从 Codex 官方模型缓存生成 LiteLLM model_list。
+# 从 Codex 官方模型缓存生成 LiteLLM model_list，并统一维护 Codex 模型目录。
 #
 # 默认行为：
-# - 读取 models_cache.json 中 visibility=list 的完整官方模型列表；
-# - 保持官方顺序并去重，不再按 GPT 版本过滤；
-# - 追加官方 Codex 模型页已公布、但本地缓存可能尚未刷新的受控模型；
-# - 将受控补充模型幂等合并回 Codex 运行时目录，避免 Codex 列表落后于官方文档；
-# - 只在生成完整内容后替换目标文件，失败不会破坏现有配置；
+# - 运行时缓存、Codex 显示目录和 LiteLLM model_list 使用同一份三模型白名单；
+# - 清理其他模型，保持三个模型的固定顺序并去重；
+# - 只在生成并校验完整内容后替换目标文件，失败不会破坏现有配置；
 # - 运行时由 start-agent-gateway.ps1 在停止旧网关前调用。
 
 param(
@@ -22,10 +20,11 @@ $ErrorActionPreference = "Stop"
 $BeginMarker = "  # BEGIN GENERATED GPT MODELS"
 $EndMarker = "  # END GENERATED GPT MODELS"
 
-# OpenAI 官方 Codex 模型页已经公布该模型，但 Codex 本地缓存可能滞后于文档。
-# 缓存刷新后 Add-UniqueModel 会自动去重，避免重复路由。
-$SupplementalOfficialModelSlugs = @(
-    "gpt-6-astra"
+# 所有目录和网关统一使用这三个官方模型；顺序也是对外显示和路由顺序。
+$AllowedModelSlugs = @(
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna"
 )
 
 function Add-UniqueModel {
@@ -53,43 +52,6 @@ function Read-ModelCatalog {
     }
 }
 
-function New-SupplementalCodexModel {
-    param(
-        [Parameter(Mandatory)]
-        [object]$TemplateModel,
-        [Parameter(Mandatory)]
-        [string]$Slug
-    )
-
-    $model = $TemplateModel | ConvertTo-Json -Depth 100 | ConvertFrom-Json
-
-    switch ($Slug) {
-        "gpt-6-astra" {
-            $model.slug = "gpt-6-astra"
-            $model.display_name = "GPT-6 Astra"
-            $model.description = "Our most capable model for complex work across code, apps, and research, combining advanced reasoning, computer use, and stronger judgment."
-            $model.default_reasoning_level = "low"
-            $model.supported_reasoning_levels = @(
-                [pscustomobject]@{ effort = "low"; description = "Fast responses with lighter reasoning" },
-                [pscustomobject]@{ effort = "medium"; description = "Balances speed and reasoning depth for everyday tasks" },
-                [pscustomobject]@{ effort = "high"; description = "Greater reasoning depth for complex problems" },
-                [pscustomobject]@{ effort = "xhigh"; description = "Extra high reasoning depth for complex problems" },
-                [pscustomobject]@{ effort = "max"; description = "Maximum reasoning depth for the hardest problems" }
-            )
-            $model.visibility = "list"
-            $model.supported_in_api = $true
-            $model.priority = 0
-            $model.context_window = 1050000
-            $model.max_context_window = 1050000
-        }
-        default {
-            throw "没有受控补充模型元数据: $Slug"
-        }
-    }
-
-    return $model
-}
-
 function Sync-CodexRuntimeCatalog {
     param(
         [Parameter(Mandatory)]
@@ -97,48 +59,34 @@ function Sync-CodexRuntimeCatalog {
     )
 
     $existingModels = @($Catalog.models)
-    $supplementalSet = [System.Collections.Generic.HashSet[string]]::new(
-        [System.StringComparer]::OrdinalIgnoreCase
-    )
-    foreach ($slug in $SupplementalOfficialModelSlugs) {
-        [void]$supplementalSet.Add($slug)
-    }
-
     $updatedModels = [System.Collections.Generic.List[object]]::new()
     $changed = $false
 
-    foreach ($slug in $SupplementalOfficialModelSlugs) {
+    foreach ($slug in $AllowedModelSlugs) {
         $existing = @(
             $existingModels | Where-Object { [string]$_.slug -eq $slug }
         ) | Select-Object -First 1
 
         if ($null -eq $existing) {
-            $templateModel = @(
-                $existingModels | Where-Object { [string]$_.visibility -eq "list" }
-            ) | Select-Object -First 1
-            if ($null -eq $templateModel) {
-                throw "无法为 Codex 补充模型找到可复制的 visibility=list 元数据模板"
-            }
-
-            [void]$updatedModels.Add(
-                (New-SupplementalCodexModel -TemplateModel $templateModel -Slug $slug)
-            )
-            $changed = $true
-            Write-Host "Codex 运行时目录将补充官方模型: $slug"
+            throw "Codex 运行时目录缺少统一模型: $slug"
         }
-        else {
-            [void]$updatedModels.Add($existing)
-            if ([string]$existing.visibility -ne "list") {
-                $existing.visibility = "list"
-                $changed = $true
-                Write-Host "Codex 运行时目录将显示官方模型: $slug"
-            }
+
+        [void]$updatedModels.Add($existing)
+        if ([string]$existing.visibility -ne "list") {
+            $existing.visibility = "list"
+            $changed = $true
         }
     }
 
-    foreach ($model in $existingModels) {
-        if (-not $supplementalSet.Contains([string]$model.slug)) {
-            [void]$updatedModels.Add($model)
+    if ($existingModels.Count -ne $updatedModels.Count) {
+        $changed = $true
+    }
+    else {
+        for ($index = 0; $index -lt $updatedModels.Count; $index++) {
+            if ([string]$existingModels[$index].slug -ne [string]$updatedModels[$index].slug) {
+                $changed = $true
+                break
+            }
         }
     }
 
@@ -159,7 +107,10 @@ function Sync-CodexRuntimeCatalog {
         [System.IO.File]::WriteAllText($tempPath, $updatedJson, $utf8NoBom)
 
         $validated = Get-Content -Raw -LiteralPath $tempPath | ConvertFrom-Json
-        foreach ($slug in $SupplementalOfficialModelSlugs) {
+        if (@($validated.models).Count -ne $AllowedModelSlugs.Count) {
+            throw "Codex 运行时目录写入校验失败：模型数量不是 $($AllowedModelSlugs.Count)"
+        }
+        foreach ($slug in $AllowedModelSlugs) {
             $entry = @(
                 $validated.models | Where-Object { [string]$_.slug -eq $slug }
             ) | Select-Object -First 1
@@ -170,7 +121,7 @@ function Sync-CodexRuntimeCatalog {
 
         Move-Item -LiteralPath $tempPath -Destination $CatalogPath -Force
         Remove-Item -LiteralPath $backupPath -Force
-        Write-Host "Codex 运行时模型目录已同步（$($SupplementalOfficialModelSlugs -join ', ')）"
+        Write-Host "Codex 运行时模型目录已同步（仅保留 $($AllowedModelSlugs -join ', ')）"
         return $true
     }
     catch {
@@ -213,49 +164,20 @@ function Sync-CodexDisplayCatalog {
     }
 
     $existingModels = @($catalog.models)
-    $supplementalSet = [System.Collections.Generic.HashSet[string]]::new(
-        [System.StringComparer]::OrdinalIgnoreCase
-    )
-    foreach ($slug in $SupplementalOfficialModelSlugs) {
-        [void]$supplementalSet.Add($slug)
-    }
-
     $updatedModels = [System.Collections.Generic.List[object]]::new()
-    $changed = $false
-
-    foreach ($slug in $SupplementalOfficialModelSlugs) {
+    foreach ($slug in $AllowedModelSlugs) {
         $existing = @(
             $existingModels | Where-Object { [string]$_.slug -eq $slug }
         ) | Select-Object -First 1
 
         if ($null -eq $existing) {
-            $templateModel = @(
-                $existingModels | Where-Object { [string]$_.visibility -eq "list" }
-            ) | Select-Object -First 1
-            if ($null -eq $templateModel) {
-                throw "无法为 Codex 显示目录找到可复制的 visibility=list 元数据模板"
-            }
+            throw "Codex 显示目录缺少统一模型: $slug"
+        }
 
-            [void]$updatedModels.Add(
-                (New-SupplementalCodexModel -TemplateModel $templateModel -Slug $slug)
-            )
-            $changed = $true
-            Write-Host "Codex 显示目录将补充官方模型: $slug"
+        if ([string]$existing.visibility -ne "list") {
+            $existing.visibility = "list"
         }
-        else {
-            [void]$updatedModels.Add($existing)
-            if ([string]$existing.visibility -ne "list") {
-                $existing.visibility = "list"
-                $changed = $true
-                Write-Host "Codex 显示目录将显示官方模型: $slug"
-            }
-        }
-    }
-
-    foreach ($model in $existingModels) {
-        if (-not $supplementalSet.Contains([string]$model.slug)) {
-            [void]$updatedModels.Add($model)
-        }
+        [void]$updatedModels.Add($existing)
     }
 
     $catalog.models = $updatedModels.ToArray()
@@ -286,7 +208,10 @@ function Sync-CodexDisplayCatalog {
         [System.IO.File]::WriteAllText($tempPath, $updatedJson, $utf8NoBom)
 
         $validated = Get-Content -Raw -LiteralPath $tempPath | ConvertFrom-Json
-        foreach ($slug in $SupplementalOfficialModelSlugs) {
+        if (@($validated.models).Count -ne $AllowedModelSlugs.Count) {
+            throw "Codex 显示模型目录写入校验失败：模型数量不是 $($AllowedModelSlugs.Count)"
+        }
+        foreach ($slug in $AllowedModelSlugs) {
             $entry = @(
                 $validated.models | Where-Object { [string]$_.slug -eq $slug }
             ) | Select-Object -First 1
@@ -303,7 +228,7 @@ function Sync-CodexDisplayCatalog {
         if (Test-Path -LiteralPath $backupPath) {
             Remove-Item -LiteralPath $backupPath -Force
         }
-        Write-Host "Codex 显示模型目录已同步（$($SupplementalOfficialModelSlugs -join ', ')）"
+        Write-Host "Codex 显示模型目录已同步（仅保留 $($AllowedModelSlugs -join ', ')）"
         return $true
     }
     catch {
@@ -376,37 +301,33 @@ function Ensure-CodexDisplayCatalogConfig {
     }
 }
 
-function Get-OfficialModelSlugs {
+function Get-AllowedModelSlugs {
     param(
         [object]$Catalog
     )
-
-    $models = [System.Collections.Generic.List[string]]::new()
 
     if ($null -eq $Catalog.models) {
         throw "Codex 官方模型缓存没有 models 数组"
     }
 
-    foreach ($entry in @($Catalog.models)) {
-        $slug = [string]$entry.slug
-
-        if (
-            [string]$entry.visibility -eq "list" -and
-            $slug -match '^[A-Za-z0-9][A-Za-z0-9._-]*$'
-        ) {
-            Add-UniqueModel -Models $models -Model $slug
-        }
-    }
-
-    foreach ($slug in $SupplementalOfficialModelSlugs) {
+    $models = [System.Collections.Generic.List[string]]::new()
+    foreach ($slug in $AllowedModelSlugs) {
         if ($slug -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
-            throw "受控补充模型 slug 无效: $slug"
+            throw "统一模型 slug 无效: $slug"
         }
+
+        $entry = @(
+            $Catalog.models | Where-Object { [string]$_.slug -eq $slug }
+        ) | Select-Object -First 1
+        if ($null -eq $entry) {
+            throw "Codex 官方模型缓存缺少统一模型: $slug"
+        }
+
         Add-UniqueModel -Models $models -Model $slug
     }
 
-    if ($models.Count -eq 0) {
-        throw "Codex 官方模型缓存没有 visibility=list 的有效模型"
+    if ($models.Count -ne $AllowedModelSlugs.Count) {
+        throw "Codex 官方模型缓存未包含完整的三模型白名单"
     }
     return $models.ToArray()
 }
@@ -443,7 +364,15 @@ if ($beginIndex -lt 0 -or $endIndex -lt 0 -or $endIndex -le $beginIndex) {
 }
 
 $catalog = Read-ModelCatalog
-$models = @(Get-OfficialModelSlugs -Catalog $catalog)
+
+if ($CheckOnly) {
+    $models = @(Get-AllowedModelSlugs -Catalog $catalog)
+    Write-Output "GPT 模型同步预览（统一保留 $($models.Count) 个）：$($models -join ', ')"
+    exit 0
+}
+
+[void](Sync-CodexRuntimeCatalog -Catalog $catalog)
+$models = @(Get-AllowedModelSlugs -Catalog $catalog)
 $block = (New-GeneratedModelBlock -Models $models) -join [Environment]::NewLine
 $replacement = "$BeginMarker$([Environment]::NewLine)$block$([Environment]::NewLine)$EndMarker"
 
@@ -452,12 +381,6 @@ $suffixStart = $endIndex + $EndMarker.Length
 $suffix = $template.Substring($suffixStart)
 $generated = $prefix + $replacement + $suffix
 
-if ($CheckOnly) {
-    Write-Output "GPT 模型同步预览（$($models.Count) 个）：$($models -join ', ')"
-    exit 0
-}
-
-[void](Sync-CodexRuntimeCatalog -Catalog $catalog)
 [void](Sync-CodexDisplayCatalog)
 [void](Ensure-CodexDisplayCatalogConfig)
 
