@@ -1,7 +1,8 @@
 # Codex 模型路由桥接配置：Codex → LiteLLM → ChatGPT GPT family。
 #
 # model_list 中 BEGIN/END GENERATED GPT MODELS 之间的内容由
-# sync-agent-gpt-models.ps1 从 Codex 官方运行时目录生成；Codex 自身目录由 Codex 管理。
+# sync-agent-gpt-models.ps1 从 Codex 官方运行时目录生成，并幂等补充已核验的官方模型；
+# Codex 自身目录仍由 Codex 管理。
 #
 # 安全约定：
 # - 密钥只经环境变量注入，绝不写入本文件/日志/仓库。
@@ -9,6 +10,12 @@
 # - num_retries=0：重试所有权归调用方（Codex/daemon），LiteLLM 只转发一次。
 model_list:
   # BEGIN GENERATED GPT MODELS
+  - model_name: 'gpt-6-astra'
+    model_info:
+      mode: responses
+    litellm_params:
+      model: 'chatgpt/gpt-6-astra'
+      timeout: 120
   - model_name: 'gpt-5.6-sol'
     model_info:
       mode: responses
@@ -44,12 +51,6 @@ model_list:
       mode: responses
     litellm_params:
       model: 'chatgpt/gpt-5.4-mini'
-      timeout: 120
-  - model_name: 'gpt-6-astra'
-    model_info:
-      mode: responses
-    litellm_params:
-      model: 'chatgpt/gpt-6-astra'
       timeout: 120
   # END GENERATED GPT MODELS
 litellm_settings:

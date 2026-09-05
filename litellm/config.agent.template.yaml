@@ -1,7 +1,8 @@
 # Codex 模型路由桥接配置：Codex → LiteLLM → ChatGPT GPT family。
 #
 # model_list 中 BEGIN/END GENERATED GPT MODELS 之间的内容由
-# sync-agent-gpt-models.ps1 从 Codex 官方运行时目录生成；Codex 自身目录由 Codex 管理。
+# sync-agent-gpt-models.ps1 从 Codex 官方运行时目录生成，并幂等补充已核验的官方模型；
+# Codex 自身目录仍由 Codex 管理。
 #
 # 安全约定：
 # - 密钥只经环境变量注入，绝不写入本文件/日志/仓库。

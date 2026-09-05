@@ -102,8 +102,10 @@ litellm/
   并补充官方 Codex 模型页已公布但本地缓存尚未刷新时的
   `gpt-6-astra`；这些条目以官方名称进入 LiteLLM `/v1/models`，并通过
   `chatgpt/<official-model>` provider route 转发。Codex 自身继续使用 Codex 管理的
-  官方运行时目录，本项目不写入或替换 Codex 模型目录；网关重启后即可加载新的
-  LiteLLM 列表。
+  官方运行时目录；同步脚本会把已核验的补充模型幂等合并回该目录，缓存未来刷新后
+  自动去重，不替换其他 Codex 模型元数据；同时生成 Codex 可解析的
+  `%USERPROFILE%\.codex\models.json` 并确保 `config.toml` 的 `model_catalog_json` 引用它。
+  网关重启后即可加载新的 LiteLLM 列表，Codex Desktop/CLI 重新启动后即可重新读取模型目录。
 - 运行中的网关不会因模型目录变化而后台重启；这样避免中断活动 Codex 请求。
   若要立即应用新列表，请在当前请求结束后运行
   `scripts/start-agent-gateway.ps1`。
