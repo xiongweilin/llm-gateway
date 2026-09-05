@@ -61,6 +61,7 @@ $LiteLlmBaseUrl = 'http://127.0.0.1:4101/v1'
 $GatewayTask = 'LiteLLM-Agent-Gateway'
 $ControlTask = 'ControlPlane'
 $GatewayStart = Join-Path $GatewayRoot 'scripts\start-agent-gateway.ps1'
+$GatewayWatch = Join-Path $GatewayRoot 'scripts\watch-agent-gateway.ps1'
 $ControlPython = Join-Path $ControlRoot '.venv\Scripts\python.exe'
 $ControlConfig = Join-Path $ControlRoot 'control_plane.toml'
 $ControlConfigPy = Join-Path $ControlRoot 'src\control_plane\config.py'
@@ -299,9 +300,9 @@ function Rollback{
 }
 
 try{
-    $stage='preflight';foreach($p in @($GatewayStart,$ControlPython,$ControlConfig,$ControlConfigPy,$ControlAlertPy,$CodexConfig,$CodexModelCache)){if(-not(Test-Path -LiteralPath $p -PathType Leaf)){Fail "missing target: $p"}}
+    $stage='preflight';foreach($p in @($GatewayStart,$GatewayWatch,$ControlPython,$ControlConfig,$ControlConfigPy,$ControlAlertPy,$CodexConfig,$CodexModelCache)){if(-not(Test-Path -LiteralPath $p -PathType Leaf)){Fail "missing target: $p"}}
     $gatewayTaskBefore=TaskInfo $GatewayTask;$controlTaskBefore=TaskInfo $ControlTask
-    if($gatewayTaskBefore.Action-notmatch'(?i)start-agent-gateway\.ps1'){Fail 'gateway task action mismatch'};if($controlTaskBefore.Action-notmatch'(?i)Run-ControlPlaneHidden\.vbs'){Fail 'control task action mismatch'}
+    if($gatewayTaskBefore.Action-notmatch'(?i)watch-agent-gateway\.ps1'){Fail 'gateway task action mismatch: watchdog required'};if($controlTaskBefore.Action-notmatch'(?i)Run-ControlPlaneHidden\.vbs'){Fail 'control task action mismatch'}
     $configSource=ReadText $ControlConfigPy
     if (-not (
         $configSource.Contains('diagnosis_model: str = "gpt-5.6-luna"') -and
