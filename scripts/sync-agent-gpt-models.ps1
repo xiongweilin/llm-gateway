@@ -3,6 +3,7 @@
 # 默认行为：
 # - 读取 models_cache.json 中 visibility=list 的完整官方模型列表；
 # - 保持官方顺序并去重，不再按 GPT 版本过滤；
+# - 追加官方 Codex 模型页已公布、但本地缓存可能尚未刷新的受控模型；
 # - Codex 继续使用自身未过滤的官方模型目录；
 # - 只在生成完整内容后替换目标文件，失败不会破坏现有配置；
 # - 运行时由 start-agent-gateway.ps1 在停止旧网关前调用。
@@ -18,6 +19,12 @@ $ErrorActionPreference = "Stop"
 
 $BeginMarker = "  # BEGIN GENERATED GPT MODELS"
 $EndMarker = "  # END GENERATED GPT MODELS"
+
+# OpenAI 官方 Codex 模型页已经公布该模型，但 Codex 本地缓存可能滞后于文档。
+# 缓存刷新后 Add-UniqueModel 会自动去重，避免重复路由。
+$SupplementalOfficialModelSlugs = @(
+    "gpt-6-astra"
+)
 
 function Add-UniqueModel {
     param(
@@ -64,6 +71,13 @@ function Get-OfficialModelSlugs {
         ) {
             Add-UniqueModel -Models $models -Model $slug
         }
+    }
+
+    foreach ($slug in $SupplementalOfficialModelSlugs) {
+        if ($slug -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
+            throw "受控补充模型 slug 无效: $slug"
+        }
+        Add-UniqueModel -Models $models -Model $slug
     }
 
     if ($models.Count -eq 0) {

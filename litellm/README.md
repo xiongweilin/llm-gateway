@@ -97,14 +97,13 @@ litellm/
 - 账号路由：GPT family 经 `chatgpt/` provider 走 OpenAI 账号（复用
   `~/.codex/auth.json` 登录态，无需 API key），默认 base
   `https://chatgpt.com/backend-api/codex`，消耗账号余额。
-- 模型列表由 `scripts/sync-agent-gpt-models.ps1` 在网关启动前生成：始终显示
-  `gpt-5.6-sol` 与 `gpt-5.6-luna`，并追加
-  `%USERPROFILE%\.codex\models.json` 中所有 GPT-5.6 及更新系列模型；旧 GPT 和其他
-  provider 不进入 LiteLLM `/v1/models`，也不进入 Codex 的
-  `%USERPROFILE%\.codex\models.filtered.json`。Codex 的
-  `model_catalog_json` 已指向这个过滤副本，因此模型目录更新后，下次网关启动会
-  自动刷新下一次启动时的 Codex 列表，不需要手工编辑 YAML 或 JSON；Codex Desktop/CLI
-  本身需要完全退出并重新启动，才会重新读取 `config.toml` 和该过滤目录。
+- 模型列表由 `scripts/sync-agent-gpt-models.ps1` 在网关启动前生成：读取
+  `%USERPROFILE%\.codex\models_cache.json` 中 `visibility=list` 的官方模型，
+  并补充官方 Codex 模型页已公布但本地缓存尚未刷新时的
+  `gpt-6-astra`；这些条目以官方名称进入 LiteLLM `/v1/models`，并通过
+  `chatgpt/<official-model>` provider route 转发。Codex 自身继续使用 Codex 管理的
+  官方运行时目录，本项目不写入或替换 Codex 模型目录；网关重启后即可加载新的
+  LiteLLM 列表。
 - 运行中的网关不会因模型目录变化而后台重启；这样避免中断活动 Codex 请求。
   若要立即应用新列表，请在当前请求结束后运行
   `scripts/start-agent-gateway.ps1`。

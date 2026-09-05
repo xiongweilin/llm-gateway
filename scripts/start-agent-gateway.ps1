@@ -6,16 +6,10 @@
 # 用法:
 #   pwsh -NoProfile -File scripts\start-agent-gateway.ps1
 #   pwsh -NoProfile -File scripts\start-agent-gateway.ps1 -NoVerify
-#   pwsh -NoProfile -File scripts\start-agent-gateway.ps1 -KeyEnv <path>
 #
-# 密钥来源优先级:
-#   $env:OPENCODEGO_API_KEY
-#   $env:USERPROFILE\.codex\litellm-opencode-go.env
-#
-# 本脚本不会打印密钥值。
+# 当前 GPT-only 路由复用 Codex 登录态，本脚本不读取 provider API key。
 
 param(
-    [string]$KeyEnv = "",
     [switch]$NoVerify
 )
 
@@ -35,7 +29,6 @@ $PidFile = Join-Path $Root "litellm\.agent-gateway.pid"
 $ProxyPidFile = Join-Path $Root "litellm\.agent-proxy.pid"
 
 $VenvPython = Join-Path $Root "litellm\.venv\Scripts\python.exe"
-$VenvLiteLLM = Join-Path $Root "litellm\.venv\Scripts\litellm.exe"
 $ProxyScript = Join-Path $Root "tools\agent-zstd-proxy.py"
 $ServerEntry = Join-Path $Root "litellm\run_server.py"
 $ModelSyncScript = Join-Path $Root "scripts\sync-agent-gpt-models.ps1"
@@ -175,51 +168,6 @@ function Show-LogTail {
 }
 
 
-# ------------------------------------------------------------
-# 1. 解析 API Key
-# ------------------------------------------------------------
-
-if (-not $env:OPENCODEGO_API_KEY) {
-
-    if (-not $KeyEnv) {
-        $KeyEnv = Join-Path `
-            $env:USERPROFILE `
-            ".codex\litellm-opencode-go.env"
-    }
-
-    if (Test-Path $KeyEnv) {
-
-        foreach ($line in Get-Content $KeyEnv) {
-
-            if (
-                $line -match '^\s*OPENCODEGO_API_KEY\s*=\s*(.+?)\s*$'
-            ) {
-                $env:OPENCODEGO_API_KEY = $matches[1]
-                break
-            }
-        }
-    }
-}
-
-if (-not $env:OPENCODEGO_API_KEY) {
-    Write-Warning "未找到 OPENCODEGO_API_KEY；当前 GPT-only 配置不需要该变量。"
-}
-
-# DeepSeek 官方 API key（可选；DeepSeek 路由需要）。
-if (-not $env:DEEPSEEK_API_KEY) {
-    $DeepSeekKeyEnv = Join-Path `
-        $env:USERPROFILE `
-        ".codex\litellm-deepseek.env"
-    if (Test-Path $DeepSeekKeyEnv) {
-        foreach ($line in Get-Content $DeepSeekKeyEnv) {
-            if ($line -match '^\s*DEEPSEEK_API_KEY\s*=\s*(.+?)\s*$') {
-                $env:DEEPSEEK_API_KEY = $matches[1]
-                break
-            }
-        }
-    }
-}
-
 # LiteLLM 1.96.0 会给每个 ChatGPT Responses 请求重复注入约 7.5 KB 的旧
 # Codex 提示。请求本身已经携带当前指令，只保留后端要求的最小身份前缀。
 # 显式设置环境变量时仍以用户值为准。
@@ -230,12 +178,8 @@ if (-not $env:CHATGPT_DEFAULT_INSTRUCTIONS) {
 
 
 # ------------------------------------------------------------
-# 2. 基础文件检查
+# 1. 基础文件检查
 # ------------------------------------------------------------
-
-if (-not (Test-Path $Cfg)) {
-    Write-Error "LiteLLM 配置不存在: $Cfg"
-}
 
 if (-not (Test-Path $VenvPython)) {
     Write-Error "Python venv 不存在: $VenvPython"
@@ -259,9 +203,13 @@ if (-not (Test-Path $ConfigTemplate)) {
     -TemplatePath $ConfigTemplate `
     -OutputPath $Cfg
 
+if (-not (Test-Path -LiteralPath $Cfg)) {
+    Write-Error "模型同步完成后仍未生成 LiteLLM 配置: $Cfg"
+}
+
 
 # ------------------------------------------------------------
-# 3. 清理本桥遗留监听
+# 2. 清理本桥遗留监听
 # ------------------------------------------------------------
 
 Stop-OwnPortOwner -Port 4100 -Tag "zstd 代理(4100)"
@@ -272,7 +220,7 @@ Remove-Item $ProxyPidFile -Force -ErrorAction SilentlyContinue
 
 
 # ------------------------------------------------------------
-# 4. 清理旧日志
+# 3. 清理旧日志
 # ------------------------------------------------------------
 
 Remove-Item $LogOut -Force -ErrorAction SilentlyContinue
@@ -282,58 +230,24 @@ Remove-Item $ProxyErr -Force -ErrorAction SilentlyContinue
 
 
 # ------------------------------------------------------------
-# 5. 启动 LiteLLM :4101
+# 4. 启动 LiteLLM :4101
 # ------------------------------------------------------------
 
-Push-Location $Root
-
-try {
-
-    if (Test-Path $VenvPython) {
-
-        # 首选 venv python 直接运行 litellm 入口（run_server.py）。
-        # 不用 venv 中的 litellm.exe：那是 uv 生成的 trampoline，项目目录
-        # 移动后无法 canonicalize 脚本路径（"uv trampoline failed to
-        # canonicalize script path"）。这样 $proc 就是 LiteLLM 进程本身，
-        # 不经过 cmd.exe，避免父进程退出造成误判。
-        $proc = Start-Process `
-            -FilePath $VenvPython `
-            -ArgumentList @(
-                $ServerEntry,
-                "--config", $Cfg,
-                "--host", "127.0.0.1",
-                "--port", "4101"
-            ) `
-            -RedirectStandardOutput $LogOut `
-            -RedirectStandardError $LogErr `
-            -WindowStyle Hidden `
-            -PassThru
-    }
-    else {
-
-        # venv 中没有 litellm.exe 时才 fallback 到 uv。
-        # 后面的 readiness 判断以真实端口为准，
-        # 不依赖 uv wrapper 是否仍然存活。
-        $proc = Start-Process `
-            -FilePath "uv" `
-            -ArgumentList @(
-                "run",
-                "--no-sync",
-                "--project", "litellm",
-                "litellm",
-                "--config", $Cfg,
-                "--host", "127.0.0.1",
-                "--port", "4101"
-            ) `
-            -RedirectStandardOutput $LogOut `
-            -RedirectStandardError $LogErr `
-            -WindowStyle Hidden `
-            -PassThru
-    }
-}
-finally {
-    Pop-Location
-}
+# venv 已在前置检查中成为硬依赖，直接运行自定义入口。
+# 这样 $proc 始终就是 LiteLLM Python 进程，避免包装器退出造成进程状态误判。
+$proc = Start-Process `
+    -FilePath $VenvPython `
+    -WorkingDirectory $Root `
+    -ArgumentList @(
+        $ServerEntry,
+        "--config", $Cfg,
+        "--host", "127.0.0.1",
+        "--port", "4101"
+    ) `
+    -RedirectStandardOutput $LogOut `
+    -RedirectStandardError $LogErr `
+    -WindowStyle Hidden `
+    -PassThru
 
 $proc.Id | Set-Content $PidFile
 
@@ -341,7 +255,7 @@ Write-Host "LiteLLM 启动命令已执行 pid=$($proc.Id)（127.0.0.1:4101）"
 
 
 # ------------------------------------------------------------
-# 6. 等待 LiteLLM :4101
+# 5. 等待 LiteLLM :4101
 # ------------------------------------------------------------
 
 $ready = $false
@@ -395,7 +309,7 @@ Write-Host "LiteLLM codex 网关就绪（127.0.0.1:4101，pid=$litePid）"
 
 
 # ------------------------------------------------------------
-# 7. 启动 zstd proxy :4100 -> :4101
+# 6. 启动 zstd proxy :4100 -> :4101
 # ------------------------------------------------------------
 
 $proxy = Start-Process `
@@ -416,7 +330,7 @@ Write-Host "zstd 代理启动命令已执行 pid=$($proxy.Id)"
 
 
 # ------------------------------------------------------------
-# 8. 等待 zstd proxy :4100
+# 7. 等待 zstd proxy :4100
 # ------------------------------------------------------------
 
 $proxyReady = $false
@@ -496,7 +410,7 @@ Write-Host "zstd 解压代理就绪（127.0.0.1:4100 -> 4101，pid=$proxyPid）"
 
 
 # ------------------------------------------------------------
-# 9. 验证 :4100 -> :4101
+# 8. 验证 :4100 -> :4101
 # ------------------------------------------------------------
 
 if (-not $NoVerify) {
@@ -534,13 +448,13 @@ if (-not $NoVerify) {
 
 
 # ------------------------------------------------------------
-# 10. 最终状态
+# 9. 最终状态
 # ------------------------------------------------------------
 
 Write-Host ""
 Write-Host "Codex 网桥启动完成："
-Write-Host "  Codex      -> http://127.0.0.1:4100"
-Write-Host "  zstd proxy -> http://127.0.0.1:4101"
+Write-Host "  Codex      -> zstd proxy http://127.0.0.1:4100"
+Write-Host "  zstd proxy -> LiteLLM http://127.0.0.1:4101"
 Write-Host "  LiteLLM    -> ChatGPT GPT family"
 Write-Host ""
 
