@@ -1,11 +1,11 @@
-"""LiteLLM 服务入口与 OpenCode Go Responses 兼容层。
+"""LiteLLM 服务入口与 outbound Responses 兼容层。
 
 等价于 console script `litellm`，但可被 venv python 直接执行（不依赖 uv
-trampoline，项目目录移动后仍可用）。OpenCode Go 对最终 outbound Responses
-tool schema 要求所有 ``properties`` key 都出现在 ``required`` 中；这里在
-LiteLLM 完成 provider 转换后再做一次仅限 OpenCode Go 的校正。
+trampoline，项目目录移动后仍可用）。某些 outbound Responses 上游对 tool
+schema 有比 LiteLLM 更严格的要求；这里在 LiteLLM 完成转换后做必要的兼容校正。
 """
 
+import os
 from typing import Any
 
 import litellm
@@ -136,4 +136,8 @@ OpenAIResponsesAPIConfig.transform_responses_api_request = _transform_responses_
 
 
 if __name__ == "__main__":
+    os.environ.setdefault(
+        "CHATGPT_DEFAULT_INSTRUCTIONS",
+        "You are Codex, based on GPT-5. You are running as a coding agent in the Codex CLI on a user's computer.",
+    )
     litellm.run_server()

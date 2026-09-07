@@ -11,7 +11,7 @@ SPEC.loader.exec_module(proxy)
 
 
 def test_chat_proxy_adds_session_only_for_chat_deployment() -> None:
-    omen = {"model": "omen-alpha", "messages": [{"role": "user", "content": "hi"}]}
+    omen = {"model": "opencode-go/omen-alpha", "messages": [{"role": "user", "content": "hi"}]}
     raw_omen = json.dumps(omen).encode()
 
     normalized, session = proxy.ensure_session(raw_omen, {})
@@ -28,7 +28,7 @@ def test_chat_proxy_adds_session_only_for_chat_deployment() -> None:
 
 
 def test_chat_proxy_preserves_explicit_session_header() -> None:
-    request = {"model": "omen-alpha", "messages": []}
+    request = {"model": "opencode-go/omen-alpha", "messages": []}
     raw = json.dumps(request).encode()
 
     normalized, session = proxy.ensure_session(
@@ -42,7 +42,7 @@ def test_chat_proxy_preserves_explicit_session_header() -> None:
 
 def test_chat_proxy_does_not_treat_responses_model_as_chat() -> None:
     request = {
-        "model": "muse-spark-1.3-contributor",
+        "model": "opencode-go/muse-spark-1.3-contributor",
         "input": "hello",
     }
     raw = json.dumps(request).encode()
@@ -51,6 +51,31 @@ def test_chat_proxy_does_not_treat_responses_model_as_chat() -> None:
 
     assert normalized == raw
     assert session is None
+
+
+def test_chat_proxy_enforces_protocol_boundary_and_filters_models() -> None:
+    assert proxy.is_allowed_path("/v1/chat/completions", "POST")
+    assert proxy.is_allowed_path("/v1/models", "GET")
+    assert proxy.is_allowed_path("/health/liveliness", "GET")
+    assert not proxy.is_allowed_path("/v1/responses", "POST")
+    assert not proxy.is_allowed_path("/v1/alpha/search", "GET")
+
+    upstream = json.dumps(
+        {
+            "object": "list",
+            "data": [
+                {"id": "responses-model-a", "object": "model"},
+                {"id": "chat-model-a", "object": "model"},
+            ],
+        }
+    ).encode()
+    filtered = json.loads(proxy.filter_models_response(upstream, {"chat-model-a"}))
+    assert [item["id"] for item in filtered["data"]] == ["chat-model-a"]
+
+
+def test_chat_proxy_session_requires_formal_model_id() -> None:
+    assert proxy._model_requires_session("opencode-go/omen-alpha")
+    assert not proxy._model_requires_session("omen-alpha")
 
 
 def test_chat_proxy_preserves_query_string() -> None:

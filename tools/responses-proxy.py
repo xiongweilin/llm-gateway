@@ -20,10 +20,17 @@ import sys
 import uuid
 from collections import Counter
 from collections.abc import Mapping
+from pathlib import Path
 
 import aiohttp
 import aiohttp.web
 import zstandard
+
+try:
+    from protocol_models import load_protocol_models
+except ModuleNotFoundError:  # pragma: no cover - direct file loading in tests
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from protocol_models import load_protocol_models
 
 log = logging.getLogger("responses-proxy")
 
@@ -99,9 +106,7 @@ def _opaque_opencode_session(source: str) -> str:
 
 def is_opencode_model(model: object) -> bool:
     """Return whether a Responses request targets the OpenCode Go route."""
-    return isinstance(model, str) and (
-        model.startswith(OPENCODE_MODEL_PREFIX) or model.startswith("muse-spark-")
-    )
+    return isinstance(model, str) and model.startswith(OPENCODE_MODEL_PREFIX)
 
 
 def is_muse_model(model: object) -> bool:
@@ -237,11 +242,97 @@ def ensure_muse_autonomous_instructions(body: bytes) -> bytes:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
 
 
-def is_control_plane_path(path: str) -> bool:
-    """Return whether a Codex control-plane endpoint must bypass LiteLLM."""
+RESPONSES_PATH = "/v1/responses"
+MODELS_PATH = "/v1/models"
+HEALTH_PATH = "/health/liveliness"
+PRIVATE_AGENT_ITEM_TYPES = {"agent_message"}
+COLLABORATION_NAMESPACES = {"collaboration", PLAINTEXT_COLLABORATION_NAMESPACE}
+CUSTOM_TOOL_TYPES = {"custom", "custom_tool_call", "custom_tool_call_output"}
+
+
+def _walk_dicts(value):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from _walk_dicts(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk_dicts(child)
+
+
+def has_private_agent_items(value) -> bool:
+    """Return whether the request contains a private input item shape."""
+    return any(item.get("type") in PRIVATE_AGENT_ITEM_TYPES for item in _walk_dicts(value))
+
+
+def has_additional_tools(value) -> bool:
+    """Return whether the request contains an additional-tools input item."""
+    return any(item.get("type") == "additional_tools" for item in _walk_dicts(value))
+
+
+def has_collaboration_items(value) -> bool:
+    """Return whether the request contains reserved collaboration structures."""
+    for item in _walk_dicts(value):
+        if item.get("type") == "namespace" and item.get("name") in COLLABORATION_NAMESPACES:
+            return True
+        if item.get("namespace") in COLLABORATION_NAMESPACES:
+            return True
+        name = item.get("name")
+        if isinstance(name, str):
+            if name in COLLABORATION_TOOLS or _flat_collaboration_tool_name(name):
+                return True
+        if "encrypted_function_args" in item:
+            return True
+    return False
+
+
+def has_custom_tool_items(value) -> bool:
+    """Return whether the request contains custom tool declarations or items."""
+    return any(item.get("type") in CUSTOM_TOOL_TYPES for item in _walk_dicts(value))
+
+
+def has_namespaced_tools(value) -> bool:
+    """Return whether the request contains namespace tool declarations or calls."""
+    return any(item.get("type") == "namespace" or "namespace" in item for item in _walk_dicts(value))
+
+
+def is_compatibility_extension_path(path: str) -> bool:
+    """Return whether a non-model compatibility extension belongs on 4100."""
     return path == CONTROL_PLANE_PATH_PREFIX or path.startswith(
         f"{CONTROL_PLANE_PATH_PREFIX}/"
     )
+
+
+def is_allowed_path(path: str, method: str) -> bool:
+    """Keep the Responses ingress from becoming a generic reverse proxy."""
+    if is_compatibility_extension_path(path):
+        return True
+    if path == RESPONSES_PATH:
+        return method in {"GET", "POST"}
+    if path in {MODELS_PATH, HEALTH_PATH}:
+        return method == "GET"
+    return False
+
+
+def filter_models_response(body: bytes, allowed_models: set[str]) -> bytes:
+    """Filter a standard model-list response by runtime protocol mode."""
+    try:
+        value = json.loads(body)
+    except Exception:
+        return body
+    if not isinstance(value, dict) or not isinstance(value.get("data"), list):
+        return body
+    value["data"] = [
+        item
+        for item in value["data"]
+        if isinstance(item, dict) and item.get("id") in allowed_models
+    ]
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+
+
+def is_control_plane_path(path: str) -> bool:
+    """Return whether a Codex control-plane endpoint must bypass LiteLLM."""
+    return is_compatibility_extension_path(path)
 
 
 def select_upstream_backend(
@@ -764,6 +855,8 @@ def normalize_tool_schemas(body: bytes) -> bytes:
 
     model = obj.get("model")
     strict_required = isinstance(model, str) and model.startswith("opencode-go/")
+    if not strict_required:
+        return body
     fixed_type = 0
     fixed_required = 0
 
@@ -1170,6 +1263,7 @@ def rewrite_sse_collaboration_calls(
     namespaced_tools: dict[str, tuple[str, str]] | None = None,
     custom_tool_names: set[str] | None = None,
     custom_call_item_ids: dict[str, str] | None = None,
+    rewrite_collaboration: bool = True,
 ) -> tuple[bytes, bytes, int]:
     """Rewrite complete SSE data lines and retain any split trailing line."""
     parts = data.split(b"\n")
@@ -1187,13 +1281,16 @@ def rewrite_sse_collaboration_calls(
             except Exception:
                 event = None
             if event is not None:
-                event_changed = _force_plaintext_collaboration_calls(event)
-                event_changed += _rewrite_opencode_response_tools(
-                    event,
-                    namespaced_tools=namespaced_tools,
-                    custom_tool_names=custom_tool_names,
-                    custom_call_item_ids=custom_call_item_ids,
-                )
+                event_changed = 0
+                if rewrite_collaboration:
+                    event_changed += _force_plaintext_collaboration_calls(event)
+                if namespaced_tools or custom_tool_names:
+                    event_changed += _rewrite_opencode_response_tools(
+                        event,
+                        namespaced_tools=namespaced_tools,
+                        custom_tool_names=custom_tool_names,
+                        custom_call_item_ids=custom_call_item_ids,
+                    )
                 if normalize_function_args:
                     event_changed += _normalize_function_call_arguments(event)
                 if event_changed:
@@ -1212,6 +1309,7 @@ def aggregate_responses_sse(
     normalize_function_args: bool = False,
     namespaced_tools: dict[str, tuple[str, str]] | None = None,
     custom_tool_names: set[str] | None = None,
+    rewrite_collaboration: bool = True,
 ) -> tuple[bytes | None, int]:
     """Build one Responses JSON object for callers that requested non-streaming."""
     completed = None
@@ -1236,12 +1334,15 @@ def aggregate_responses_sse(
         return None, 0
     if not completed.get("output") and output_items:
         completed["output"] = [item for _, item in sorted(output_items.items())]
-    rewritten_calls = _force_plaintext_collaboration_calls(completed)
-    rewritten_calls += _rewrite_opencode_response_tools(
-        completed,
-        namespaced_tools=namespaced_tools,
-        custom_tool_names=custom_tool_names,
-    )
+    rewritten_calls = 0
+    if rewrite_collaboration:
+        rewritten_calls += _force_plaintext_collaboration_calls(completed)
+    if namespaced_tools or custom_tool_names:
+        rewritten_calls += _rewrite_opencode_response_tools(
+            completed,
+            namespaced_tools=namespaced_tools,
+            custom_tool_names=custom_tool_names,
+        )
     if normalize_function_args:
         rewritten_calls += _normalize_function_call_arguments(completed)
     return (
@@ -1354,13 +1455,25 @@ async def handle(
     backend: str,
     session: aiohttp.ClientSession,
     control_plane_backend: str | None = None,
+    responses_models: set[str] | None = None,
 ):
+    if not is_allowed_path(req.path, req.method):
+        return aiohttp.web.json_response(
+            {
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "path is not served by the Responses ingress",
+                }
+            },
+            status=404,
+        )
+
     # Codex 对 /v1/responses 总是先尝试 WebSocket 传输；本代理对 WS 返回
     # 426 UPGRADE_REQUIRED，Codex 据此干净回退到 HTTP（FallbackToHttp）。
     # 返回 404/405 会让桌面端进入重连循环。
     if (
         req.headers.get("Upgrade", "").lower() == "websocket"
-        and "/responses" in req.path
+        and req.path == RESPONSES_PATH
     ):
         return aiohttp.web.Response(
             status=426,
@@ -1371,7 +1484,7 @@ async def handle(
     # GET /v1/responses（会话打开时的探针/取响应）返回 404 而不是
     # LiteLLM 的 405——桌面端把 405 视为「不支持 Responses 协议」并放弃，
     # 404 则视为「无此响应」并继续走 POST。
-    if req.method == "GET" and "/responses" in req.path:
+    if req.method == "GET" and req.path == RESPONSES_PATH:
         return aiohttp.web.Response(
             status=404,
             content_type="application/json",
@@ -1387,28 +1500,49 @@ async def handle(
     custom_call_item_ids: dict[str, str] = {}
     opencode_session: str | None = None
     model: object = None
-    if req.method == "POST" and "/responses" in req.path:
+    request_obj: dict = {}
+    collaboration_compatibility = False
+    if req.method == "POST" and req.path == RESPONSES_PATH:
         try:
-            request_obj = json.loads(dec)
-            caller_stream = bool(request_obj.get("stream", False))
-            model = request_obj.get("model")
-            normalize_function_args = (
-                isinstance(model, str) and model.startswith("opencode-go/")
-            )
+            parsed_request = json.loads(dec)
+            if isinstance(parsed_request, dict):
+                request_obj = parsed_request
+                caller_stream = bool(request_obj.get("stream", False))
+                model = request_obj.get("model")
+                normalize_function_args = (
+                    isinstance(model, str) and model.startswith("opencode-go/")
+                )
         except Exception:
             pass
+        if responses_models is not None and model is not None and model not in responses_models:
+            return aiohttp.web.json_response(
+                {
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "model is not available on the Responses ingress",
+                    }
+                },
+                status=404,
+            )
         before = request_summary(dec)
         log.info("request summary %s", json.dumps(before, sort_keys=True))
         dec = normalize_scalar_responses_input(dec)
-        dec = adapt_collaboration_request(dec)
-        dec = normalize_opencode_additional_tools(dec)
-        custom_tool_names = collect_opencode_custom_tool_names(dec)
-        dec = normalize_opencode_custom_tools(dec)
-        dec = normalize_agent_messages(dec)
-        namespaced_tools = collect_opencode_namespaced_tools(dec)
-        dec = normalize_opencode_namespaced_calls(dec)
-        dec = normalize_opencode_tool_descriptions(dec)
-        dec = normalize_tool_schemas(dec)
+        collaboration_compatibility = has_collaboration_items(request_obj)
+        if collaboration_compatibility:
+            dec = adapt_collaboration_request(dec)
+        if is_opencode_model(model) and has_additional_tools(request_obj):
+            dec = normalize_opencode_additional_tools(dec)
+        if is_opencode_model(model) and has_custom_tool_items(request_obj):
+            custom_tool_names = collect_opencode_custom_tool_names(dec)
+            dec = normalize_opencode_custom_tools(dec)
+        if has_private_agent_items(request_obj):
+            dec = normalize_agent_messages(dec)
+        if is_opencode_model(model) and has_namespaced_tools(request_obj):
+            namespaced_tools = collect_opencode_namespaced_tools(dec)
+            dec = normalize_opencode_namespaced_calls(dec)
+        if is_opencode_model(model) and isinstance(request_obj.get("tools"), list):
+            dec = normalize_opencode_tool_descriptions(dec)
+            dec = normalize_tool_schemas(dec)
         dec, opencode_session = ensure_opencode_session(dec, req.headers)
         dec = ensure_muse_autonomous_instructions(dec)
         normalized = request_summary(dec)
@@ -1463,13 +1597,14 @@ async def handle(
             compress=False, timeout=aiohttp.ClientTimeout(total=4200),
         ) as up:
             upstream_is_sse = "text/event-stream" in up.headers.get("Content-Type", "").lower()
-            if req.method == "POST" and "/responses" in req.path and not caller_stream and upstream_is_sse:
+            if req.method == "POST" and req.path == RESPONSES_PATH and not caller_stream and upstream_is_sse:
                 upstream_body = await up.read()
                 aggregated, rewritten_calls = aggregate_responses_sse(
                     upstream_body,
                     normalize_function_args=normalize_function_args,
                     namespaced_tools=namespaced_tools,
                     custom_tool_names=custom_tool_names,
+                    rewrite_collaboration=collaboration_compatibility,
                 )
                 if aggregated is not None:
                     headers = {
@@ -1495,6 +1630,30 @@ async def handle(
                         headers=headers,
                         content_type="application/json",
                     )
+            if req.method == "GET" and req.path == MODELS_PATH and 200 <= up.status < 300:
+                upstream_body = await up.read()
+                filtered = (
+                    filter_models_response(upstream_body, responses_models)
+                    if responses_models is not None
+                    else upstream_body
+                )
+                response_headers = {
+                    k: v
+                    for k, v in up.headers.items()
+                    if k.lower()
+                    not in {
+                        "content-length",
+                        "content-type",
+                        "transfer-encoding",
+                        "connection",
+                    }
+                }
+                return aiohttp.web.Response(
+                    status=up.status,
+                    body=filtered,
+                    headers=response_headers,
+                    content_type="application/json",
+                )
             resp = aiohttp.web.StreamResponse(status=up.status)
             for k, v in up.headers.items():
                 lk = k.lower()
@@ -1502,28 +1661,29 @@ async def handle(
                     continue
                 resp.headers[k] = v
             await resp.prepare(req)
-            rewrite_collaboration = (
-                "/responses" in req.path
+            rewrite_sse = (
+                req.path == RESPONSES_PATH
                 and upstream_is_sse
             )
             pending = b""
             rewritten_calls = 0
             async for chunk in up.content.iter_any():
                 if chunk:
-                    if rewrite_collaboration:
+                    if rewrite_sse:
                         out, pending, changed = rewrite_sse_collaboration_calls(
                             pending + chunk,
                             normalize_function_args=normalize_function_args,
                             namespaced_tools=namespaced_tools,
                             custom_tool_names=custom_tool_names,
                             custom_call_item_ids=custom_call_item_ids,
+                            rewrite_collaboration=collaboration_compatibility,
                         )
                         rewritten_calls += changed
                         if out:
                             await resp.write(out)
                     else:
                         await resp.write(chunk)
-            if rewrite_collaboration and pending:
+            if rewrite_sse and pending:
                 out, _, changed = rewrite_sse_collaboration_calls(
                     pending,
                     final=True,
@@ -1531,6 +1691,7 @@ async def handle(
                     namespaced_tools=namespaced_tools,
                     custom_tool_names=custom_tool_names,
                     custom_call_item_ids=custom_call_item_ids,
+                    rewrite_collaboration=collaboration_compatibility,
                 )
                 rewritten_calls += changed
                 if out:
@@ -1553,6 +1714,12 @@ async def main() -> None:
     control_plane_backend = (
         sys.argv[3] if len(sys.argv) > 3 else DEFAULT_CONTROL_PLANE_BACKEND
     )
+    config_path = (
+        sys.argv[4]
+        if len(sys.argv) > 4
+        else str(Path(__file__).resolve().parents[1] / "litellm" / "config.runtime.yaml")
+    )
+    responses_models, _ = load_protocol_models(config_path)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     # 桌面端打开会话会发送完整历史（+工具 schema），超过 aiohttp 默认
     # 1MB 请求体上限会返回 413；调大至 128MB。
@@ -1565,7 +1732,13 @@ async def main() -> None:
     app.router.add_route(
         "*",
         "/{tail:.*}",
-        lambda r: handle(r, backend, session, control_plane_backend),
+        lambda r: handle(
+            r,
+            backend,
+            session,
+            control_plane_backend,
+            responses_models,
+        ),
     )
     runner = aiohttp.web.AppRunner(app)
     await runner.setup()

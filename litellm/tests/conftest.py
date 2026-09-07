@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 import socket
 import subprocess
 import sys
@@ -30,19 +29,6 @@ def free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
-
-
-def find_litellm_entrypoint() -> Path | None:
-    """定位 venv 内的 litellm 控制台脚本（uv run litellm 的等价物）。"""
-    scripts = Path(sys.executable).parent
-    candidates = [scripts / "litellm.exe", scripts / "litellm"]
-    for c in candidates:
-        if c.exists():
-            return c
-    # 兜底：PATH 上的 uv（uv run litellm）
-    if shutil.which("uv"):
-        return None  # 由调用方用 uv run litellm 启动
-    return None
 
 
 def _stop_process(proc: subprocess.Popen) -> None:
@@ -79,11 +65,22 @@ def proxy(fake_provider: FakeProviderServer) -> dict[str, object]:
     env["FAKE_PROVIDER_API_KEY"] = FAKE_PROVIDER_KEY
     env["FAKE_PROVIDER_API_BASE"] = fake_provider.api_base
 
-    entrypoint = find_litellm_entrypoint()
-    if entrypoint is not None:
-        cmd = [str(entrypoint), "--config", str(CONFIG_PATH), "--host", "127.0.0.1", "--port", str(port), "--telemetry", "False"]
-    else:
-        cmd = ["uv", "run", "litellm", "--config", str(CONFIG_PATH), "--host", "127.0.0.1", "--port", str(port), "--telemetry", "False"]
+    # Invoke the repository entry directly.  Console-script trampolines can
+    # retain an absolute path from a previous checkout location after the
+    # workspace is moved, while the active venv Python remains valid.
+    server_entry = PROJECT_ROOT / "run_server.py"
+    cmd = [
+        sys.executable,
+        str(server_entry),
+        "--config",
+        str(CONFIG_PATH),
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+        "--telemetry",
+        "False",
+    ]
 
     log_handle = open(PROXY_LOG, "w", encoding="utf-8")
     proc = subprocess.Popen(

@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 
 PROXY_PATH = Path(__file__).parents[2] / "tools" / "responses-proxy.py"
-SPEC = importlib.util.spec_from_file_location("agent_zstd_proxy", PROXY_PATH)
+SPEC = importlib.util.spec_from_file_location("responses_proxy", PROXY_PATH)
 assert SPEC and SPEC.loader
 proxy = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(proxy)
@@ -61,7 +61,7 @@ def test_collaboration_request_uses_plaintext_alias() -> None:
 
 def test_collaboration_request_repairs_flattened_call_name() -> None:
     request = {
-        "model": "opencode-go/muse-spark-1.2-contributor",
+        "model": "opencode-go/muse-spark-1.3-contributor",
         "input": [
             {
                 "type": "function_call",
@@ -80,7 +80,7 @@ def test_collaboration_request_repairs_flattened_call_name() -> None:
 
 def test_collaboration_request_repairs_unqualified_call_name() -> None:
     request = {
-        "model": "opencode-go/muse-spark-1.2-contributor",
+        "model": "opencode-go/muse-spark-1.3-contributor",
         "input": [
             {
                 "type": "function_call",
@@ -492,7 +492,7 @@ def test_tool_schema_normalization_keeps_valid_request_unchanged() -> None:
 
 def test_tool_schema_required_normalization_is_scoped_to_opencode() -> None:
     request = {
-        "model": "opencode-go/muse-spark-1.2-contributor",
+        "model": "opencode-go/muse-spark-1.3-contributor",
         "tools": [
             {
                 "type": "function",
@@ -518,7 +518,7 @@ def test_tool_schema_required_normalization_is_scoped_to_opencode() -> None:
 
 def test_custom_tool_declarations_are_bridged_for_opencode() -> None:
     request = {
-        "model": "opencode-go/muse-spark-1.2-contributor",
+        "model": "opencode-go/muse-spark-1.3-contributor",
         "tools": [
             {"type": "custom", "name": "exec", "description": "Run JavaScript."},
             {"type": "function", "name": "read_file", "parameters": {"properties": {}}},
@@ -553,7 +553,7 @@ def test_custom_tool_declarations_are_bridged_for_opencode() -> None:
 
 def test_namespaced_calls_are_repaired_for_opencode() -> None:
     request = {
-        "model": "opencode-go/muse-spark-1.2-contributor",
+        "model": "opencode-go/muse-spark-1.3-contributor",
         "tools": [
             {
                 "type": "namespace",
@@ -745,6 +745,48 @@ def test_control_plane_paths_bypass_litellm_without_changing_model_routes() -> N
         proxy.build_upstream_url(model_backend, "/v1/responses")
         == "http://127.0.0.1:4101/v1/responses"
     )
+
+
+def test_responses_proxy_enforces_protocol_boundary_and_filters_models() -> None:
+    assert proxy.is_allowed_path("/v1/responses", "POST")
+    assert proxy.is_allowed_path("/v1/models", "GET")
+    assert proxy.is_allowed_path("/health/liveliness", "GET")
+    assert proxy.is_allowed_path("/v1/alpha/search", "GET")
+    assert not proxy.is_allowed_path("/v1/chat/completions", "POST")
+
+    upstream = json.dumps(
+        {
+            "object": "list",
+            "data": [
+                {"id": "responses-model-a", "object": "model"},
+                {"id": "chat-model-a", "object": "model"},
+            ],
+        }
+    ).encode()
+    filtered = json.loads(proxy.filter_models_response(upstream, {"responses-model-a"}))
+    assert [item["id"] for item in filtered["data"]] == ["responses-model-a"]
+
+
+def test_compatibility_features_are_shape_driven() -> None:
+    plain = {"model": "responses-model-a", "input": [{"type": "message"}]}
+    private = {
+        "model": "responses-model-a",
+        "input": [{"type": "agent_message", "content": []}],
+    }
+    collaboration = {
+        "model": "responses-model-a",
+        "tools": [{"type": "namespace", "name": "collaboration", "tools": []}],
+    }
+    additional = {
+        "model": "responses-model-a",
+        "input": [{"type": "additional_tools", "tools": []}],
+    }
+
+    assert not proxy.has_private_agent_items(plain)
+    assert proxy.has_private_agent_items(private)
+    assert proxy.has_collaboration_items(collaboration)
+    assert proxy.has_additional_tools(additional)
+    assert not proxy.has_additional_tools(plain)
 
 
 def test_opencode_session_is_injected_without_touching_gpt_requests() -> None:

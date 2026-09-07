@@ -63,7 +63,7 @@ def test_normalize_opencode_tool_schemas_handles_nested_input_tools() -> None:
 def test_openai_responses_transform_applies_outbound_compatibility() -> None:
     config = OpenAIResponsesAPIConfig()
     data = config.transform_responses_api_request(
-        model="muse-spark-1.2-contributor",
+        model="opencode-go/muse-spark-1.3-contributor",
         input=[],
         response_api_optional_request_params={
             "tools": [

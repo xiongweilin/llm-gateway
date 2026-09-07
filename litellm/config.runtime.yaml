@@ -1,0 +1,55 @@
+# Protocol ingress and LiteLLM routing configuration.
+# The generated model_list is owned by litellm/models.yaml.
+model_list:
+  # BEGIN GENERATED RUNTIME MODELS
+  - model_name: 'gpt-5.6-sol'
+    model_info:
+      mode: responses
+    litellm_params:
+      model: 'chatgpt/gpt-5.6-sol'
+      timeout: 900
+  - model_name: 'gpt-5.6-terra'
+    model_info:
+      mode: responses
+    litellm_params:
+      model: 'chatgpt/gpt-5.6-terra'
+      timeout: 900
+  - model_name: 'gpt-5.6-luna'
+    model_info:
+      mode: responses
+    litellm_params:
+      model: 'chatgpt/gpt-5.6-luna'
+      timeout: 900
+  - model_name: 'opencode-go/muse-spark-1.3-contributor'
+    model_info:
+      mode: responses
+    litellm_params:
+      model: 'openai/muse-spark-1.3-contributor'
+      api_base: 'https://opencode.ai/zen/go/v1'
+      api_key: 'os.environ/OPENCODEGO_API_KEY'
+      timeout: 3600
+      stream_timeout: 3600
+  - model_name: 'opencode-go/omen-alpha'
+    model_info:
+      mode: chat
+    litellm_params:
+      model: 'openai/omen-alpha'
+      api_base: 'https://opencode.ai/zen/go/v1'
+      api_key: 'os.environ/OPENCODEGO_API_KEY'
+      timeout: 3600
+      stream_timeout: 3600
+      drop_params: true
+  # END GENERATED RUNTIME MODELS
+litellm_settings:
+  cache: false
+  callbacks: []
+  success_callback: []
+  failure_callback: []
+  turn_off_message_logging: true
+  suppress_debug_info: true
+  telemetry: false
+general_settings:
+  store_model_in_db: false
+  cancel_on_disconnect: true
+router_settings:
+  num_retries: 0

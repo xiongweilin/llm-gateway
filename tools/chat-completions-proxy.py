@@ -22,14 +22,25 @@ import logging
 import sys
 import uuid
 from collections.abc import Mapping
+from pathlib import Path
 
 import aiohttp
 import aiohttp.web
 
+try:
+    from protocol_models import load_protocol_models
+except ModuleNotFoundError:  # pragma: no cover - direct file loading in tests
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from protocol_models import load_protocol_models
+
 
 DEFAULT_BACKEND = "http://127.0.0.1:4101"
 SESSION_HEADER = "x-opencode-session"
-CHAT_COMPLETIONS_PATH = "/chat/completions"
+CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
+RESPONSES_PATH = "/v1/responses"
+MODELS_PATH = "/v1/models"
+HEALTH_PATH = "/health/liveliness"
+CONTROL_PLANE_PATH_PREFIX = "/v1/alpha"
 _PROCESS_SESSION = f"chat-{uuid.uuid4().hex}"
 
 
@@ -76,9 +87,7 @@ def _opaque_session(source: str) -> str:
 
 def _model_requires_session(model: object) -> bool:
     """Return whether the configured chat deployment needs a session header."""
-    return isinstance(model, str) and (
-        model == "omen-alpha" or model.endswith("/omen-alpha")
-    )
+    return model == "opencode-go/omen-alpha"
 
 
 def resolve_session(body: bytes, headers: Mapping[str, str]) -> str | None:
@@ -147,6 +156,37 @@ def build_upstream_url(backend: str, path: str, query_string: str = "") -> str:
     return url
 
 
+def is_compatibility_extension_path(path: str) -> bool:
+    return path == CONTROL_PLANE_PATH_PREFIX or path.startswith(
+        f"{CONTROL_PLANE_PATH_PREFIX}/"
+    )
+
+
+def is_allowed_path(path: str, method: str) -> bool:
+    if is_compatibility_extension_path(path):
+        return False
+    if path == CHAT_COMPLETIONS_PATH:
+        return method in {"GET", "POST"}
+    if path in {MODELS_PATH, HEALTH_PATH}:
+        return method == "GET"
+    return False
+
+
+def filter_models_response(body: bytes, allowed_models: set[str]) -> bytes:
+    try:
+        value = json.loads(body)
+    except Exception:
+        return body
+    if not isinstance(value, dict) or not isinstance(value.get("data"), list):
+        return body
+    value["data"] = [
+        item
+        for item in value["data"]
+        if isinstance(item, dict) and item.get("id") in allowed_models
+    ]
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+
+
 def _forward_headers(request_headers: Mapping[str, str], body_length: int) -> dict[str, str]:
     headers: dict[str, str] = {}
     for key, value in request_headers.items():
@@ -168,10 +208,37 @@ async def handle(
     request: aiohttp.web.Request,
     backend: str,
     session: aiohttp.ClientSession,
+    chat_models: set[str] | None = None,
 ):
+    if not is_allowed_path(request.path, request.method):
+        return aiohttp.web.json_response(
+            {
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "path is not served by the Chat Completions ingress",
+                }
+            },
+            status=404,
+        )
     body = await request.read()
     provider_session: str | None = None
-    if request.method == "POST" and CHAT_COMPLETIONS_PATH in request.path:
+    model: object = None
+    if request.method == "POST" and request.path == CHAT_COMPLETIONS_PATH:
+        try:
+            request_obj = json.loads(body)
+            model = request_obj.get("model") if isinstance(request_obj, dict) else None
+        except Exception:
+            pass
+        if chat_models is not None and model is not None and model not in chat_models:
+            return aiohttp.web.json_response(
+                {
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "model is not available on the Chat Completions ingress",
+                    }
+                },
+                status=404,
+            )
         body, provider_session = ensure_session(body, request.headers)
 
     headers = _forward_headers(request.headers, len(body))
@@ -192,6 +259,16 @@ async def handle(
             content_type = upstream.headers.get("Content-Type", "")
             if "text/event-stream" not in content_type.lower():
                 response_body = await upstream.read()
+                if (
+                    request.method == "GET"
+                    and request.path == MODELS_PATH
+                    and chat_models is not None
+                    and 200 <= upstream.status < 300
+                ):
+                    response_body = filter_models_response(
+                        response_body,
+                        chat_models,
+                    )
                 response_headers = {
                     key: value
                     for key, value in upstream.headers.items()
@@ -228,6 +305,12 @@ async def handle(
 async def main() -> None:
     listen_port = int(sys.argv[1]) if len(sys.argv) > 1 else 4102
     backend = sys.argv[2] if len(sys.argv) > 2 else DEFAULT_BACKEND
+    config_path = (
+        sys.argv[3]
+        if len(sys.argv) > 3
+        else str(Path(__file__).resolve().parents[1] / "litellm" / "config.runtime.yaml")
+    )
+    _, chat_models = load_protocol_models(config_path)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     app = aiohttp.web.Application(client_max_size=128 * 1024 * 1024)
     connector = aiohttp.TCPConnector(limit=64)
@@ -235,7 +318,7 @@ async def main() -> None:
     app.router.add_route(
         "*",
         "/{tail:.*}",
-        lambda request: handle(request, backend, session),
+        lambda request: handle(request, backend, session, chat_models),
     )
     runner = aiohttp.web.AppRunner(app)
     await runner.setup()

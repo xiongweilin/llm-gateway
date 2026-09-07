@@ -1,25 +1,20 @@
-# 从 Codex 官方模型缓存生成 LiteLLM model_list，并统一维护 Codex 模型目录。
+# 同步客户端模型目录。
 #
 # 默认行为：
-# - 运行时缓存、Codex 显示目录和 LiteLLM model_list 保留三个官方 GPT 模型，
-#   并追加受控的 OpenCode Go supplemental models；
+# - 运行时缓存和显示目录保留三个官方 GPT 模型，
+#   并追加受控的 supplemental models；
 # - 清理其他模型，保持固定顺序并去重；
 # - 只在生成并校验完整内容后替换目标文件，失败不会破坏现有配置；
-# - 运行时由 start-agent-gateway.ps1 在停止旧网关前调用。
+# - 本脚本不生成或决定 LiteLLM runtime configuration。
 
 param(
     [string]$CatalogPath = (Join-Path $env:USERPROFILE ".codex\models_cache.json"),
     [string]$CodexDisplayCatalogPath = (Join-Path $env:USERPROFILE ".codex\models.json"),
     [string]$CodexConfigPath = (Join-Path $env:USERPROFILE ".codex\config.toml"),
-    [string]$TemplatePath = (Join-Path $PSScriptRoot "..\litellm\config.agent.template.yaml"),
-    [string]$OutputPath = (Join-Path $PSScriptRoot "..\litellm\config.agent.yaml"),
     [switch]$CheckOnly
 )
 
 $ErrorActionPreference = "Stop"
-
-$BeginMarker = "  # BEGIN GENERATED GPT MODELS"
-$EndMarker = "  # END GENERATED GPT MODELS"
 
 # 所有目录和网关统一使用这三个官方模型；顺序也是对外显示和路由顺序。
 $AllowedModelSlugs = @(
@@ -405,37 +400,6 @@ function Get-AllowedModelSlugs {
     return $models.ToArray()
 }
 
-function New-GeneratedModelBlock {
-    param(
-        [Parameter(Mandatory)]
-        [string[]]$Models
-    )
-
-    $lines = [System.Collections.Generic.List[string]]::new()
-    foreach ($model in $Models) {
-        # 模型 slug 已经通过严格字符白名单校验，这里用单引号保持 YAML 标量稳定。
-        [void]$lines.Add("  - model_name: '$model'")
-        [void]$lines.Add("    model_info:")
-        [void]$lines.Add("      mode: responses")
-        [void]$lines.Add("    litellm_params:")
-        [void]$lines.Add("      model: 'chatgpt/$model'")
-        [void]$lines.Add("      timeout: 900")
-    }
-    return $lines.ToArray()
-}
-
-if (-not (Test-Path -LiteralPath $TemplatePath)) {
-    throw "LiteLLM 配置模板不存在: $TemplatePath"
-}
-
-$template = Get-Content -Raw -LiteralPath $TemplatePath
-$beginIndex = $template.IndexOf($BeginMarker, [System.StringComparison]::Ordinal)
-$endIndex = $template.IndexOf($EndMarker, [System.StringComparison]::Ordinal)
-
-if ($beginIndex -lt 0 -or $endIndex -lt 0 -or $endIndex -le $beginIndex) {
-    throw "配置模板缺少有效的 GPT 模型标记"
-}
-
 $catalog = Read-ModelCatalog
 
 if ($CheckOnly) {
@@ -445,45 +409,6 @@ if ($CheckOnly) {
 }
 
 [void](Sync-CodexRuntimeCatalog -Catalog $catalog)
-$models = @(Get-AllowedModelSlugs -Catalog $catalog)
-$block = (New-GeneratedModelBlock -Models $models) -join [Environment]::NewLine
-$replacement = "$BeginMarker$([Environment]::NewLine)$block$([Environment]::NewLine)$EndMarker"
-
-$prefix = $template.Substring(0, $beginIndex)
-$suffixStart = $endIndex + $EndMarker.Length
-$suffix = $template.Substring($suffixStart)
-$generated = $prefix + $replacement + $suffix
-
 [void](Sync-CodexDisplayCatalog)
 [void](Ensure-CodexDisplayCatalogConfig)
-
-$outputDirectory = Split-Path -Parent $OutputPath
-if (-not (Test-Path -LiteralPath $outputDirectory)) {
-    throw "LiteLLM 配置目录不存在: $outputDirectory"
-}
-
-$tempPath = "$OutputPath.tmp-$PID"
-$utf8NoBom = [System.Text.UTF8Encoding]::new($false)
-
-try {
-    [System.IO.File]::WriteAllText($tempPath, $generated, $utf8NoBom)
-
-    $same = $false
-    if (Test-Path -LiteralPath $OutputPath) {
-        $existing = [System.IO.File]::ReadAllText($OutputPath)
-        $same = $existing -ceq $generated
-    }
-
-    if ($same) {
-        Remove-Item -LiteralPath $tempPath -Force
-        Write-Host "Codex 模型配置无需更新（$($models.Count) 个受控模型）"
-    }
-    else {
-        Move-Item -LiteralPath $tempPath -Destination $OutputPath -Force
-        Write-Host "Codex 模型配置已同步（$($models.Count) 个受控模型）：$($models -join ', ')"
-    }
-}
-catch {
-    Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
-    throw
-}
+Write-Host "客户端模型目录同步完成（$($ManagedModelSlugs.Count) 个受控模型）"

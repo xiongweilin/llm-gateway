@@ -1,49 +1,89 @@
-# 停止协议入口（LiteLLM 127.0.0.1:4101 + Responses 4100 + Chat Completions 4102）。
-# 按端口杀进程树（uv 包装 + litellm python 子进程），并清理 pidfile。
-$ErrorActionPreference = "Continue"
-$Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$PidFile = Join-Path $Root "litellm\.agent-gateway.pid"
-$ResponsesProxyPidFile = Join-Path $Root "litellm\.responses-proxy.pid"
-$ChatProxyPidFile = Join-Path $Root "litellm\.chat-completions-proxy.pid"
-$LegacyProxyPidFile = Join-Path $Root "litellm\.agent-proxy.pid"
+# Stop the protocol ingress processes and the LiteLLM routing core.
+# The filename is retained for existing operator and migration references.
 
-function Stop-PortListeners {
-    param([int]$Port, [string]$Tag)
-    $conns = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
-    $killed = @()
-    foreach ($c in $conns) {
-        $owner = $c.OwningProcess
-        if ($owner -and $killed -notcontains $owner) {
-            & taskkill /PID $owner /T /F 2>$null | Out-Null
-            Write-Host "已停止 $Tag 监听进程树 pid=$owner"
-            $killed += $owner
+[CmdletBinding()]
+param()
+
+$ErrorActionPreference = 'Continue'
+Set-StrictMode -Version Latest
+
+$Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$rootPattern = [regex]::Escape($Root)
+$runtimeRoot = Join-Path $Root 'litellm'
+
+$pidFiles = @(
+    (Join-Path $runtimeRoot '.litellm-core.pid'),
+    (Join-Path $runtimeRoot '.responses-ingress.pid'),
+    (Join-Path $runtimeRoot '.chat-completions-ingress.pid'),
+    # legacy cleanup: files written by older revisions
+    (Join-Path $runtimeRoot '.agent-gateway.pid'),
+    (Join-Path $runtimeRoot '.responses-proxy.pid'),
+    (Join-Path $runtimeRoot '.chat-completions-proxy.pid'),
+    (Join-Path $runtimeRoot '.agent-proxy.pid')
+)
+
+function Get-CommandLine([int]$ProcessId) {
+    $process = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction SilentlyContinue
+    if ($null -eq $process) { return '' }
+    return [string]$process.CommandLine
+}
+
+function Test-Owned([string]$CommandLine) {
+    if ([string]::IsNullOrWhiteSpace($CommandLine) -or $CommandLine -notmatch "(?i)$rootPattern") {
+        return $false
+    }
+    return $CommandLine -match '(?i)(run_server\.py|responses-proxy\.py|agent-zstd-proxy\.py|chat-completions-proxy\.py|config\.(runtime|agent)\.yaml)'
+}
+
+function Stop-Port([int]$Port, [string]$Label) {
+    $connections = @(Get-NetTCPConnection -LocalAddress '127.0.0.1' -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+    $stopped = [System.Collections.Generic.HashSet[int]]::new()
+    foreach ($connection in $connections) {
+        $processId = [int]$connection.OwningProcess
+        if (-not $stopped.Add($processId)) { continue }
+        $commandLine = Get-CommandLine $processId
+        if (-not (Test-Owned $commandLine)) {
+            Write-Warning "leaving unrelated listener on 127.0.0.1:$Port (pid=$processId)"
+            continue
+        }
+        & taskkill /PID $processId /T /F 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "stopped $Label (pid=$processId)"
+        } else {
+            Write-Warning "failed to stop $Label (pid=$processId)"
         }
     }
-    if (-not $killed) { Write-Host "$Tag：无监听进程" }
-}
-
-Stop-PortListeners -Port 4101 -Tag "LiteLLM(4101)"
-Stop-PortListeners -Port 4102 -Tag "Chat Completions 代理(4102)"
-Stop-PortListeners -Port 4100 -Tag "Responses 代理(4100)"
-
-# 兜底：pidfile 中仍存活的进程（端口已释放但进程未退时）
-foreach ($pf in @($PidFile, $ResponsesProxyPidFile, $ChatProxyPidFile, $LegacyProxyPidFile)) {
-    if (Test-Path $pf) {
-        $p = Get-Content $pf -ErrorAction SilentlyContinue
-        if ($p -match '^\d+$') {
-            $alive = Get-Process -Id ([int]$p) -ErrorAction SilentlyContinue
-            if ($alive) {
-                & taskkill /PID ([int]$p) /T /F 2>$null | Out-Null
-                Write-Host "已按 pidfile 停止残留进程 pid=$p"
-            }
-        }
-        Remove-Item $pf -Force -ErrorAction SilentlyContinue
+    if ($connections.Count -eq 0) {
+        Write-Host "$Label not running"
     }
 }
 
-Start-Sleep -Seconds 2
-$still = @()
-foreach ($p in 4100, 4101, 4102) {
-    if ((Test-NetConnection 127.0.0.1 -Port $p -WarningAction SilentlyContinue).TcpTestSucceeded) { $still += $p }
+Stop-Port -Port 4102 -Label 'Chat Completions ingress'
+Stop-Port -Port 4100 -Label 'Responses ingress'
+Stop-Port -Port 4101 -Label 'LiteLLM core'
+
+foreach ($pidFile in $pidFiles) {
+    if (-not (Test-Path -LiteralPath $pidFile -PathType Leaf)) { continue }
+    $value = (Get-Content -LiteralPath $pidFile -ErrorAction SilentlyContinue | Select-Object -First 1)
+    if ($value -match '^\d+$') {
+        $processId = [int]$value
+        $commandLine = Get-CommandLine $processId
+        if (Test-Owned $commandLine) {
+            & taskkill /PID $processId /T /F 2>$null | Out-Null
+        }
+    }
+    Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
 }
-if ($still) { Write-Host "警告：端口 $($still -join ',') 仍有监听（可能被其他程序占用，未强杀）" } else { Write-Host "网桥已全部停止" }
+
+Start-Sleep -Milliseconds 500
+$remaining = @(
+    4100, 4101, 4102 |
+        Where-Object {
+            $null -ne (Get-NetTCPConnection -LocalAddress '127.0.0.1' -LocalPort $_ -State Listen -ErrorAction SilentlyContinue)
+        }
+)
+if ($remaining.Count -eq 0) {
+    Write-Host 'protocol ingress and LiteLLM core stopped'
+} else {
+    Write-Warning "ports still listening: $($remaining -join ', ')"
+}

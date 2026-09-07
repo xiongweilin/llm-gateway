@@ -1,0 +1,35 @@
+# Runtime model source of truth.
+# Provider credentials are referenced by environment variable name only.
+models:
+  - id: 'gpt-5.6-sol'
+    mode: responses
+    route:
+      model: 'chatgpt/gpt-5.6-sol'
+      timeout: 900
+  - id: 'gpt-5.6-terra'
+    mode: responses
+    route:
+      model: 'chatgpt/gpt-5.6-terra'
+      timeout: 900
+  - id: 'gpt-5.6-luna'
+    mode: responses
+    route:
+      model: 'chatgpt/gpt-5.6-luna'
+      timeout: 900
+  - id: 'opencode-go/muse-spark-1.3-contributor'
+    mode: responses
+    route:
+      model: 'openai/muse-spark-1.3-contributor'
+      api_base: 'https://opencode.ai/zen/go/v1'
+      api_key: 'os.environ/OPENCODEGO_API_KEY'
+      timeout: 3600
+      stream_timeout: 3600
+  - id: 'opencode-go/omen-alpha'
+    mode: chat
+    route:
+      model: 'openai/omen-alpha'
+      drop_params: true
+      api_base: 'https://opencode.ai/zen/go/v1'
+      api_key: 'os.environ/OPENCODEGO_API_KEY'
+      timeout: 3600
+      stream_timeout: 3600
