@@ -40,6 +40,17 @@ model_list:
       api_key: os.environ/OPENCODEGO_API_KEY
       timeout: 3600
       stream_timeout: 3600
+  # Omen Alpha exposes OpenAI-compatible Chat Completions; LiteLLM bridges
+  # Codex's Responses request to the provider-specific endpoint.
+  - model_name: 'opencode-go/omen-alpha'
+    model_info:
+      mode: chat
+    litellm_params:
+      model: 'openai/omen-alpha'
+      api_base: https://opencode.ai/zen/go/v1
+      api_key: os.environ/OPENCODEGO_API_KEY
+      timeout: 3600
+      stream_timeout: 3600
 litellm_settings:
   cache: false
   callbacks: []

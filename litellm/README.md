@@ -93,8 +93,9 @@ litellm/
 
 - 作用：Codex 统一经本项目 LiteLLM 路由到 ChatGPT 账号或 OpenCode Go。
 - 拓扑：Codex → zstd 解压代理(127.0.0.1:4100, `tools/agent-zstd-proxy.py`) →
-  LiteLLM(127.0.0.1:4101, `config.agent.yaml`) → 原生 `/responses` 上游。
-- 路径边界：GPT/Muse 的模型推理都使用 `/v1/responses` 并进入 LiteLLM；Codex
+  LiteLLM(127.0.0.1:4101, `config.agent.yaml`) → OpenCode Go 原生 `/responses`
+  或 `/chat/completions` 上游。
+- 路径边界：GPT 与 OpenCode Go 模型的 Codex 请求都使用 `/v1/responses` 并进入 LiteLLM；Codex
   宿主执行 `web__run` 时产生的 `/v1/alpha/*` control-plane 请求由 4100
   旁路到 `https://chatgpt.com/backend-api/codex`，并将上游路径映射为
   `/alpha/*`，避免被 LiteLLM 当作模型 API 返回 404。
@@ -104,12 +105,13 @@ litellm/
 - 模型列表由 `scripts/sync-agent-gpt-models.ps1` 在网关启动前生成：统一同步
   `%USERPROFILE%\.codex\models_cache.json`、Codex 可解析的
   `%USERPROFILE%\.codex\models.json` 和 LiteLLM `model_list`。三个 GPT 模型由
-  生成区块维护，OpenCode Go supplemental model
-  `opencode-go/muse-spark-1.3-contributor` 由模板中的固定路由维护；四个模型会
+  生成区块维护，OpenCode Go supplemental models
+  `opencode-go/muse-spark-1.3-contributor` 与 `opencode-go/omen-alpha` 由模板中的固定路由维护；五个模型会
   同步进入 Codex 两个目录，并确保 `config.toml` 的 `model_catalog_json` 引用
   `models.json`。GPT 模型通过 `chatgpt/<official-model>` provider route 转发，
-  OpenCode Go 模型通过 `openai/muse-spark-1.3-contributor` 和
-  `https://opencode.ai/zen/go/v1` 转发；脚本每次运行都会保留这四个受控条目，
+  OpenCode Go 模型通过 `openai/muse-spark-1.3-contributor`（Responses）与
+  `openai/omen-alpha`（Chat Completions）经由
+  `https://opencode.ai/zen/go/v1` 转发；脚本每次运行都会保留这五个受控条目，
   不会因 Codex 缓存刷新而产生目录分叉。
   网关重启后即可加载新的 LiteLLM 列表，Codex Desktop/CLI 重新启动后即可重新读取模型目录。
 - 运行中的网关不会因模型目录变化而后台重启；这样避免中断活动 Codex 请求。

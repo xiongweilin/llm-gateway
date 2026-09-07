@@ -10,12 +10,14 @@
 - 4100：agent-zstd-proxy.py，监听 127.0.0.1:4100，提供 Codex Responses/zstd 兼容层。
 - 4101：LiteLLM，监听 127.0.0.1:4101，提供 OpenAI 兼容网关。
 - Codex 路径：Codex -> 4100 -> 4101 -> ChatGPT GPT family 或 OpenCode Go。
-- GPT/Muse 模型推理都走 `/v1/responses` -> 4100 -> 4101；Codex 宿主执行
+- GPT 与 OpenCode Go 模型的 Codex 请求都从 `/v1/responses` 进入 4100 -> 4101；
+  Muse 上游使用 Responses，Omen Alpha 由 LiteLLM 的 `mode: chat` 桥接到
+  OpenCode Go 的 `/chat/completions`；Codex 宿主执行
   `web__run` 时产生的 `/v1/alpha/*` control-plane 请求由 4100 旁路到
   `https://chatgpt.com/backend-api/codex`（上游路径为 `/alpha/*`），不送入
   LiteLLM。
 - 当前模型集合：gpt-5.6-sol、gpt-5.6-terra、gpt-5.6-luna、
-  opencode-go/muse-spark-1.3-contributor。
+  opencode-go/muse-spark-1.3-contributor、opencode-go/omen-alpha。
 - OpenCode Go 路由的 LiteLLM `timeout` 与 `stream_timeout` 为 3600 秒；4100 代理的
   上游总超时为 4200 秒，用于覆盖长时间推理中的流式空闲间隔。
 - Codex 工具兼容：`custom_tool_call` 在发往 OpenCode Go 时临时转为单字符串

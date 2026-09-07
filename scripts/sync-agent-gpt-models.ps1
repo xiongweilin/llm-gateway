@@ -2,7 +2,7 @@
 #
 # 默认行为：
 # - 运行时缓存、Codex 显示目录和 LiteLLM model_list 保留三个官方 GPT 模型，
-#   并追加一个受控的 OpenCode Go supplemental model；
+#   并追加受控的 OpenCode Go supplemental models；
 # - 清理其他模型，保持固定顺序并去重；
 # - 只在生成并校验完整内容后替换目标文件，失败不会破坏现有配置；
 # - 运行时由 start-agent-gateway.ps1 在停止旧网关前调用。
@@ -27,8 +27,22 @@ $AllowedModelSlugs = @(
     "gpt-5.6-terra",
     "gpt-5.6-luna"
 )
-$SupplementalModelSlug = "opencode-go/muse-spark-1.3-contributor"
-$ManagedModelSlugs = @($AllowedModelSlugs + $SupplementalModelSlug)
+$SupplementalModelDefinitions = [ordered]@{
+    "opencode-go/muse-spark-1.3-contributor" = [ordered]@{
+        DisplayName = "Muse Spark 1.3 Contributor (OpenCode Go)"
+        Description = "OpenCode Go contributor model routed through the local LiteLLM gateway."
+        Priority = 4
+        ContextWindow = 1048576
+    }
+    "opencode-go/omen-alpha" = [ordered]@{
+        DisplayName = "Omen Alpha (OpenCode Go)"
+        Description = "OpenCode Go Omen Alpha model routed through the local LiteLLM gateway."
+        Priority = 5
+        ContextWindow = 500000
+    }
+}
+$SupplementalModelSlugs = @($SupplementalModelDefinitions.Keys)
+$ManagedModelSlugs = @($AllowedModelSlugs + $SupplementalModelSlugs)
 
 function Add-UniqueModel {
     param(
@@ -73,21 +87,40 @@ function Set-ModelProperty {
     }
 }
 
+function Set-SupplementalCodexModelMetadata {
+    param(
+        [Parameter(Mandatory)]
+        [object]$Object,
+        [Parameter(Mandatory)]
+        [string]$Slug
+    )
+
+    $definition = $SupplementalModelDefinitions[$Slug]
+    if ($null -eq $definition) {
+        throw "没有 OpenCode Go 模型元数据定义: $Slug"
+    }
+
+    Set-ModelProperty -Object $Object -Name "slug" -Value $Slug
+    Set-ModelProperty -Object $Object -Name "display_name" -Value $definition.DisplayName
+    Set-ModelProperty -Object $Object -Name "description" -Value $definition.Description
+    Set-ModelProperty -Object $Object -Name "visibility" -Value "list"
+    Set-ModelProperty -Object $Object -Name "supported_in_api" -Value $true
+    Set-ModelProperty -Object $Object -Name "priority" -Value $definition.Priority
+    Set-ModelProperty -Object $Object -Name "context_window" -Value $definition.ContextWindow
+    Set-ModelProperty -Object $Object -Name "max_context_window" -Value $definition.ContextWindow
+    return $Object
+}
+
 function New-SupplementalCodexModel {
     param(
         [Parameter(Mandatory)]
-        [object]$TemplateModel
+        [object]$TemplateModel,
+        [Parameter(Mandatory)]
+        [string]$Slug
     )
 
     $model = $TemplateModel | ConvertTo-Json -Depth 100 | ConvertFrom-Json
-    Set-ModelProperty -Object $model -Name "slug" -Value $SupplementalModelSlug
-    Set-ModelProperty -Object $model -Name "display_name" -Value "Muse Spark 1.3 Contributor (OpenCode Go)"
-    Set-ModelProperty -Object $model -Name "description" -Value "OpenCode Go contributor model routed through the local LiteLLM gateway."
-    Set-ModelProperty -Object $model -Name "visibility" -Value "list"
-    Set-ModelProperty -Object $model -Name "supported_in_api" -Value $true
-    Set-ModelProperty -Object $model -Name "priority" -Value 4
-    Set-ModelProperty -Object $model -Name "context_window" -Value 1048576
-    Set-ModelProperty -Object $model -Name "max_context_window" -Value 1048576
+    [void](Set-SupplementalCodexModelMetadata -Object $model -Slug $Slug)
     return $model
 }
 
@@ -117,30 +150,27 @@ function Get-ManagedCatalogModels {
         [void]$updatedModels.Add($existing)
     }
 
-    $supplemental = @(
-        $existingModels | Where-Object { [string]$_.slug -eq $SupplementalModelSlug }
-    ) | Select-Object -First 1
-
-    if ($null -eq $supplemental) {
-        $template = @(
-            $existingModels | Where-Object { [string]$_.slug -eq "gpt-5.6-luna" }
+    foreach ($supplementalSlug in $SupplementalModelSlugs) {
+        $supplemental = @(
+            $existingModels | Where-Object { [string]$_.slug -eq $supplementalSlug }
         ) | Select-Object -First 1
-        if ($null -eq $template) {
-            throw "无法为 OpenCode Go 模型找到 Codex 元数据模板"
+
+        if ($null -eq $supplemental) {
+            $template = @(
+                $existingModels | Where-Object { [string]$_.slug -eq "gpt-5.6-luna" }
+            ) | Select-Object -First 1
+            if ($null -eq $template) {
+                throw "无法为 OpenCode Go 模型找到 Codex 元数据模板: $supplementalSlug"
+            }
+            $supplemental = New-SupplementalCodexModel -TemplateModel $template -Slug $supplementalSlug
         }
-        $supplemental = New-SupplementalCodexModel -TemplateModel $template
-    }
-    else {
-        Set-ModelProperty -Object $supplemental -Name "display_name" -Value "Muse Spark 1.3 Contributor (OpenCode Go)"
-        Set-ModelProperty -Object $supplemental -Name "description" -Value "OpenCode Go contributor model routed through the local LiteLLM gateway."
-        Set-ModelProperty -Object $supplemental -Name "visibility" -Value "list"
-        Set-ModelProperty -Object $supplemental -Name "supported_in_api" -Value $true
-        Set-ModelProperty -Object $supplemental -Name "priority" -Value 4
-        Set-ModelProperty -Object $supplemental -Name "context_window" -Value 1048576
-        Set-ModelProperty -Object $supplemental -Name "max_context_window" -Value 1048576
+        else {
+            [void](Set-SupplementalCodexModelMetadata -Object $supplemental -Slug $supplementalSlug)
+        }
+
+        [void]$updatedModels.Add($supplemental)
     }
 
-    [void]$updatedModels.Add($supplemental)
     return $updatedModels.ToArray()
 }
 
