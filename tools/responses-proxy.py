@@ -1,9 +1,10 @@
-"""Responses 协议与 control-plane 传输桥。
+"""统一 Responses/Chat 协议与 control-plane 传输桥。
 
 背景：部分客户端把 /v1/responses 请求体以 `Content-Encoding: zstd`
 发送；LiteLLM(FastAPI) 不解压请求体，导致 model 字段解析失败（400
-model=None）。本代理在 127.0.0.1:4100 收请求，zstd 解压后转发到后端
-LiteLLM（默认 127.0.0.1:4101），并流式回传 SSE 响应。
+model=None）。本代理在 127.0.0.1:4100 收取两种 OpenAI 协议请求，zstd 解压
+后转发到 LiteLLM（默认 127.0.0.1:4101），并流式回传 SSE 响应。Responses
+请求命中 chat mode 模型时，在此转换为 Chat Completions 并经 4102 转发。
 
 网页搜索等 control-plane 请求使用 `/v1/alpha/*`，不属于 LiteLLM 的模型
 API；这些路径旁路到 control-plane upstream，
@@ -31,6 +32,26 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - direct file loading in tests
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from protocol_models import load_protocol_models
+
+try:
+    from response_chat_bridge import (
+        CHAT_COMPLETIONS_PATH,
+        ChatStreamBridge,
+        chat_response_to_responses,
+        chat_sse_to_responses_json,
+        response_to_sse,
+        responses_to_chat_request,
+    )
+except ModuleNotFoundError:  # pragma: no cover - direct file loading in tests
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from response_chat_bridge import (
+        CHAT_COMPLETIONS_PATH,
+        ChatStreamBridge,
+        chat_response_to_responses,
+        chat_sse_to_responses_json,
+        response_to_sse,
+        responses_to_chat_request,
+    )
 
 log = logging.getLogger("responses-proxy")
 
@@ -185,7 +206,7 @@ def ensure_opencode_session(
     body: bytes,
     headers: Mapping[str, str],
 ) -> tuple[bytes, str | None]:
-    """Add the provider session header to LiteLLM's Responses call only."""
+    """Add the required upstream session field to an affected model call."""
     session = resolve_opencode_session(body, headers)
     if session is None:
         return body, None
@@ -304,10 +325,10 @@ def is_compatibility_extension_path(path: str) -> bool:
 
 
 def is_allowed_path(path: str, method: str) -> bool:
-    """Keep the Responses ingress from becoming a generic reverse proxy."""
+    """Expose both public OpenAI protocol paths through one ingress."""
     if is_compatibility_extension_path(path):
         return True
-    if path == RESPONSES_PATH:
+    if path in {RESPONSES_PATH, CHAT_COMPLETIONS_PATH}:
         return method in {"GET", "POST"}
     if path in {MODELS_PATH, HEALTH_PATH}:
         return method == "GET"
@@ -315,7 +336,7 @@ def is_allowed_path(path: str, method: str) -> bool:
 
 
 def filter_models_response(body: bytes, allowed_models: set[str]) -> bytes:
-    """Filter a standard model-list response by runtime protocol mode."""
+    """Filter a standard model-list response by the ingress model set."""
     try:
         value = json.loads(body)
     except Exception:
@@ -340,7 +361,7 @@ def select_upstream_backend(
     model_backend: str,
     control_plane_backend: str | None,
 ) -> str:
-    """Select the upstream without changing model Responses routing."""
+    """Select the upstream for control-plane or model traffic."""
     if control_plane_backend and is_control_plane_path(path):
         return control_plane_backend
     return model_backend
@@ -1450,27 +1471,52 @@ def normalize_scalar_responses_input(body: bytes) -> bytes:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
 
 
+def _rewrite_bridged_response(
+    response: dict,
+    normalize_function_args: bool,
+    namespaced_tools: dict[str, tuple[str, str]],
+    custom_tool_names: set[str],
+    collaboration_compatibility: bool,
+) -> int:
+    changed = 0
+    if collaboration_compatibility:
+        changed += _force_plaintext_collaboration_calls(response)
+    if namespaced_tools or custom_tool_names:
+        changed += _rewrite_opencode_response_tools(
+            response,
+            namespaced_tools=namespaced_tools,
+            custom_tool_names=custom_tool_names,
+        )
+    if normalize_function_args:
+        changed += _normalize_function_call_arguments(response)
+    return changed
+
+
 async def handle(
     req: aiohttp.web.Request,
     backend: str,
     session: aiohttp.ClientSession,
     control_plane_backend: str | None = None,
     responses_models: set[str] | None = None,
+    chat_models: set[str] | None = None,
+    chat_backend: str = "http://127.0.0.1:4102",
 ):
+    responses_models = responses_models or set()
+    chat_models = chat_models or set()
+    unified_models = responses_models | chat_models
     if not is_allowed_path(req.path, req.method):
         return aiohttp.web.json_response(
             {
                 "error": {
                     "type": "invalid_request_error",
-                    "message": "path is not served by the Responses ingress",
+                    "message": "path is not served by the unified protocol ingress",
                 }
             },
             status=404,
         )
 
-    # Codex 对 /v1/responses 总是先尝试 WebSocket 传输；本代理对 WS 返回
-    # 426 UPGRADE_REQUIRED，Codex 据此干净回退到 HTTP（FallbackToHttp）。
-    # 返回 404/405 会让桌面端进入重连循环。
+    # Codex first probes Responses over WebSocket.  Returning 426 makes it
+    # fall back to HTTP without treating the ingress as unavailable.
     if (
         req.headers.get("Upgrade", "").lower() == "websocket"
         and req.path == RESPONSES_PATH
@@ -1481,18 +1527,15 @@ async def handle(
             text='{"error":{"type":"upgrade_required",'
             '"message":"Responses WebSocket transport is disabled; use HTTP"}}',
         )
-    # GET /v1/responses（会话打开时的探针/取响应）返回 404 而不是
-    # LiteLLM 的 405——桌面端把 405 视为「不支持 Responses 协议」并放弃，
-    # 404 则视为「无此响应」并继续走 POST。
     if req.method == "GET" and req.path == RESPONSES_PATH:
         return aiohttp.web.Response(
             status=404,
             content_type="application/json",
             text='{"error":{"type":"not_found","message":"response not found"}}',
         )
+
     body = await req.read()
-    enc = req.headers.get("Content-Encoding", "")
-    dec = decompress(body, enc)
+    dec = decompress(body, req.headers.get("Content-Encoding", ""))
     caller_stream = True
     normalize_function_args = False
     namespaced_tools: dict[str, tuple[str, str]] = {}
@@ -1502,101 +1545,255 @@ async def handle(
     model: object = None
     request_obj: dict = {}
     collaboration_compatibility = False
-    if req.method == "POST" and req.path == RESPONSES_PATH:
+    bridged_responses_to_chat = False
+    upstream_path = req.path
+    tool_name_map: dict[str, tuple[str, str]] = {}
+
+    if req.method == "POST" and req.path in {RESPONSES_PATH, CHAT_COMPLETIONS_PATH}:
         try:
             parsed_request = json.loads(dec)
             if isinstance(parsed_request, dict):
                 request_obj = parsed_request
                 caller_stream = bool(request_obj.get("stream", False))
                 model = request_obj.get("model")
-                normalize_function_args = (
-                    isinstance(model, str) and model.startswith("opencode-go/")
-                )
         except Exception:
             pass
-        if responses_models is not None and model is not None and model not in responses_models:
+
+        if req.path == RESPONSES_PATH:
+            allowed_models = unified_models
+            error_message = "model is not available on the unified protocol ingress"
+        else:
+            allowed_models = chat_models
+            error_message = "model is not available on the Chat Completions route"
+        if model is not None and allowed_models and model not in allowed_models:
             return aiohttp.web.json_response(
                 {
                     "error": {
                         "type": "invalid_request_error",
-                        "message": "model is not available on the Responses ingress",
+                        "message": error_message,
                     }
                 },
                 status=404,
             )
-        before = request_summary(dec)
-        log.info("request summary %s", json.dumps(before, sort_keys=True))
-        dec = normalize_scalar_responses_input(dec)
-        collaboration_compatibility = has_collaboration_items(request_obj)
-        if collaboration_compatibility:
-            dec = adapt_collaboration_request(dec)
-        if is_opencode_model(model) and has_additional_tools(request_obj):
-            dec = normalize_opencode_additional_tools(dec)
-        if is_opencode_model(model) and has_custom_tool_items(request_obj):
-            custom_tool_names = collect_opencode_custom_tool_names(dec)
-            dec = normalize_opencode_custom_tools(dec)
-        if has_private_agent_items(request_obj):
-            dec = normalize_agent_messages(dec)
-        if is_opencode_model(model) and has_namespaced_tools(request_obj):
-            namespaced_tools = collect_opencode_namespaced_tools(dec)
-            dec = normalize_opencode_namespaced_calls(dec)
-        if is_opencode_model(model) and isinstance(request_obj.get("tools"), list):
-            dec = normalize_opencode_tool_descriptions(dec)
-            dec = normalize_tool_schemas(dec)
-        dec, opencode_session = ensure_opencode_session(dec, req.headers)
-        dec = ensure_muse_autonomous_instructions(dec)
-        normalized = request_summary(dec)
-        if normalized.get("input_types") != before.get("input_types"):
-            log.info("request summary after compatibility %s", json.dumps(normalized, sort_keys=True))
-        before_len = len(dec)
-        dec = truncate_input(dec)
-        if len(dec) != before_len:
-            after = request_summary(dec)
-            log.warning("request summary after truncation %s", json.dumps(after, sort_keys=True))
+
+        if req.path == RESPONSES_PATH:
+            normalize_function_args = (
+                isinstance(model, str) and model.startswith("opencode-go/")
+            )
+            before = request_summary(dec)
+            log.info("request summary %s", json.dumps(before, sort_keys=True))
+            dec = normalize_scalar_responses_input(dec)
+            try:
+                refreshed = json.loads(dec)
+                if isinstance(refreshed, dict):
+                    request_obj = refreshed
+            except Exception:
+                pass
+            collaboration_compatibility = has_collaboration_items(request_obj)
+            if collaboration_compatibility:
+                dec = adapt_collaboration_request(dec)
+            if is_opencode_model(model) and has_additional_tools(request_obj):
+                dec = normalize_opencode_additional_tools(dec)
+            if is_opencode_model(model) and has_custom_tool_items(request_obj):
+                custom_tool_names = collect_opencode_custom_tool_names(dec)
+                dec = normalize_opencode_custom_tools(dec)
+            if has_private_agent_items(request_obj):
+                dec = normalize_agent_messages(dec)
+            if is_opencode_model(model) and has_namespaced_tools(request_obj):
+                namespaced_tools = collect_opencode_namespaced_tools(dec)
+                dec = normalize_opencode_namespaced_calls(dec)
+            if is_opencode_model(model) and isinstance(request_obj.get("tools"), list):
+                dec = normalize_opencode_tool_descriptions(dec)
+                dec = normalize_tool_schemas(dec)
+            dec, opencode_session = ensure_opencode_session(dec, req.headers)
+            dec = ensure_muse_autonomous_instructions(dec)
+            normalized = request_summary(dec)
+            if normalized.get("input_types") != before.get("input_types"):
+                log.info("request summary after compatibility %s", json.dumps(normalized, sort_keys=True))
+            before_len = len(dec)
+            dec = truncate_input(dec)
+            if len(dec) != before_len:
+                after = request_summary(dec)
+                log.warning("request summary after truncation %s", json.dumps(after, sort_keys=True))
+
+            if model in chat_models:
+                bridged_responses_to_chat = True
+                try:
+                    chat_request, tool_name_map = responses_to_chat_request(json.loads(dec))
+                except (TypeError, json.JSONDecodeError) as exc:
+                    log.warning("Responses-to-Chat conversion failed: %s", exc)
+                    return aiohttp.web.json_response(
+                        {
+                            "error": {
+                                "type": "invalid_request_error",
+                                "message": "unable to convert Responses request to Chat Completions",
+                            }
+                        },
+                        status=400,
+                    )
+                dec = json.dumps(chat_request, ensure_ascii=False, separators=(",", ":")).encode()
+                upstream_path = CHAT_COMPLETIONS_PATH
+        else:
+            dec, opencode_session = ensure_opencode_session(dec, req.headers)
 
     control_plane_route = is_control_plane_path(req.path)
     using_control_plane = bool(control_plane_backend) and control_plane_route
     headers = {}
-    for k, v in req.headers.items():
-        lk = k.lower()
-        if lk in ("host", "content-length", "content-encoding", "connection", "transfer-encoding"):
+    for key, value in req.headers.items():
+        if key.lower() in {
+            "host",
+            "content-length",
+            "content-encoding",
+            "connection",
+            "transfer-encoding",
+        }:
             continue
-        headers[k] = v
+        headers[key] = value
     if opencode_session:
         headers[OPENCODE_SESSION_HEADER] = opencode_session
-    if using_control_plane:
-        # The bundled aiohttp runtime may not have optional Brotli support.
-        # Avoid asking the control-plane for br so its response can be
-        # forwarded without a client-side decompression failure.
+    if using_control_plane or upstream_path == CHAT_COMPLETIONS_PATH:
         for header_name in tuple(headers):
             if header_name.lower() == "accept-encoding":
                 del headers[header_name]
         headers["Accept-Encoding"] = "identity"
     headers["Content-Length"] = str(len(dec))
 
-    upstream_backend = select_upstream_backend(
-        req.path,
-        backend,
-        control_plane_backend,
-    )
-    if upstream_backend != backend:
+    if using_control_plane:
+        upstream_backend = select_upstream_backend(
+            req.path,
+            backend,
+            control_plane_backend,
+        )
+    elif bridged_responses_to_chat or req.path == CHAT_COMPLETIONS_PATH:
+        upstream_backend = chat_backend
+    else:
+        upstream_backend = backend
+    if upstream_backend != backend and not bridged_responses_to_chat and req.path != CHAT_COMPLETIONS_PATH:
         log.info("control-plane route: path=%s", req.path)
     url = build_upstream_url(
         upstream_backend,
-        req.path,
+        upstream_path,
         req.query_string,
         strip_v1_prefix=using_control_plane,
     )
 
     try:
         async with session.request(
-            req.method, url, data=dec, headers=headers,
-            # A Codex CLI session can make multiple Responses turns. The
-            # proxy must outlive the control-plane session budget so it does
-            # not cancel a still-progressing upstream request first.
-            compress=False, timeout=aiohttp.ClientTimeout(total=4200),
+            req.method,
+            url,
+            data=dec,
+            headers=headers,
+            compress=False,
+            timeout=aiohttp.ClientTimeout(total=4200),
         ) as up:
             upstream_is_sse = "text/event-stream" in up.headers.get("Content-Type", "").lower()
+
+            if bridged_responses_to_chat:
+                if not 200 <= up.status < 300:
+                    error_body = await up.read()
+                    return aiohttp.web.Response(
+                        status=up.status,
+                        body=error_body,
+                        content_type=up.headers.get("Content-Type", "application/json").split(";", 1)[0],
+                    )
+                if caller_stream:
+                    if not upstream_is_sse:
+                        chat_response = json.loads(await up.read())
+                        response_obj = chat_response_to_responses(
+                            chat_response,
+                            model if isinstance(model, str) else None,
+                            tool_name_map,
+                        )
+                        _rewrite_bridged_response(
+                            response_obj,
+                            normalize_function_args,
+                            namespaced_tools,
+                            custom_tool_names,
+                            collaboration_compatibility,
+                        )
+                        response = aiohttp.web.StreamResponse(status=up.status)
+                        response.headers["Content-Type"] = "text/event-stream"
+                        response.headers["Cache-Control"] = "no-cache"
+                        await response.prepare(req)
+                        await response.write(response_to_sse(response_obj))
+                        await response.write_eof()
+                        return response
+                    response = aiohttp.web.StreamResponse(status=up.status)
+                    response.headers["Content-Type"] = "text/event-stream"
+                    response.headers["Cache-Control"] = "no-cache"
+                    await response.prepare(req)
+                    bridge = ChatStreamBridge(model if isinstance(model, str) else None, tool_name_map)
+                    pending = b""
+                    rewritten_calls = 0
+                    async for chunk in up.content.iter_any():
+                        if not chunk:
+                            continue
+                        converted = bridge.feed(chunk)
+                        if not converted:
+                            continue
+                        out, pending, changed = rewrite_sse_collaboration_calls(
+                            pending + converted,
+                            normalize_function_args=normalize_function_args,
+                            namespaced_tools=namespaced_tools,
+                            custom_tool_names=custom_tool_names,
+                            custom_call_item_ids=custom_call_item_ids,
+                            rewrite_collaboration=collaboration_compatibility,
+                        )
+                        rewritten_calls += changed
+                        if out:
+                            await response.write(out)
+                    converted = bridge.feed(b"", final=True)
+                    out, _, changed = rewrite_sse_collaboration_calls(
+                        pending + converted,
+                        final=True,
+                        normalize_function_args=normalize_function_args,
+                        namespaced_tools=namespaced_tools,
+                        custom_tool_names=custom_tool_names,
+                        custom_call_item_ids=custom_call_item_ids,
+                        rewrite_collaboration=collaboration_compatibility,
+                    )
+                    rewritten_calls += changed
+                    if out:
+                        await response.write(out)
+                    if rewritten_calls:
+                        log.info(
+                            "bridged response compatibility rewrites=%d",
+                            rewritten_calls,
+                        )
+                    await response.write_eof()
+                    return response
+
+                upstream_body = await up.read()
+                if upstream_is_sse:
+                    response_obj = json.loads(
+                        chat_sse_to_responses_json(
+                            upstream_body,
+                            model if isinstance(model, str) else None,
+                            tool_name_map,
+                        )
+                    )
+                else:
+                    chat_response = json.loads(upstream_body)
+                    response_obj = chat_response_to_responses(
+                        chat_response,
+                        model if isinstance(model, str) else None,
+                        tool_name_map,
+                    )
+                rewritten_calls = _rewrite_bridged_response(
+                    response_obj,
+                    normalize_function_args,
+                    namespaced_tools,
+                    custom_tool_names,
+                    collaboration_compatibility,
+                )
+                if rewritten_calls:
+                    log.info("bridged response compatibility rewrites=%d", rewritten_calls)
+                return aiohttp.web.Response(
+                    status=up.status,
+                    body=json.dumps(response_obj, ensure_ascii=False, separators=(",", ":")).encode(),
+                    content_type="application/json",
+                )
+
             if req.method == "POST" and req.path == RESPONSES_PATH and not caller_stream and upstream_is_sse:
                 upstream_body = await up.read()
                 aggregated, rewritten_calls = aggregate_responses_sse(
@@ -1607,46 +1804,31 @@ async def handle(
                     rewrite_collaboration=collaboration_compatibility,
                 )
                 if aggregated is not None:
-                    headers = {
-                        k: v
-                        for k, v in up.headers.items()
-                        if k.lower()
-                        not in {
-                            "content-length",
-                            "content-type",
-                            "transfer-encoding",
-                            "connection",
-                        }
+                    response_headers = {
+                        key: value
+                        for key, value in up.headers.items()
+                        if key.lower()
+                        not in {"content-length", "content-type", "transfer-encoding", "connection"}
                     }
                     if rewritten_calls:
                         log.info(
                             "response compatibility: normalized_function_args_or_collaboration=%d",
                             rewritten_calls,
                         )
-                    log.info("responses transport compatibility: aggregated_sse_bytes=%d", len(upstream_body))
                     return aiohttp.web.Response(
                         status=up.status,
                         body=aggregated,
-                        headers=headers,
+                        headers=response_headers,
                         content_type="application/json",
                     )
             if req.method == "GET" and req.path == MODELS_PATH and 200 <= up.status < 300:
                 upstream_body = await up.read()
-                filtered = (
-                    filter_models_response(upstream_body, responses_models)
-                    if responses_models is not None
-                    else upstream_body
-                )
+                filtered = filter_models_response(upstream_body, unified_models)
                 response_headers = {
-                    k: v
-                    for k, v in up.headers.items()
-                    if k.lower()
-                    not in {
-                        "content-length",
-                        "content-type",
-                        "transfer-encoding",
-                        "connection",
-                    }
+                    key: value
+                    for key, value in up.headers.items()
+                    if key.lower()
+                    not in {"content-length", "content-type", "transfer-encoding", "connection"}
                 }
                 return aiohttp.web.Response(
                     status=up.status,
@@ -1654,35 +1836,32 @@ async def handle(
                     headers=response_headers,
                     content_type="application/json",
                 )
-            resp = aiohttp.web.StreamResponse(status=up.status)
-            for k, v in up.headers.items():
-                lk = k.lower()
-                if lk in ("content-length", "transfer-encoding", "connection"):
+            response = aiohttp.web.StreamResponse(status=up.status)
+            for key, value in up.headers.items():
+                if key.lower() in {"content-length", "transfer-encoding", "connection"}:
                     continue
-                resp.headers[k] = v
-            await resp.prepare(req)
-            rewrite_sse = (
-                req.path == RESPONSES_PATH
-                and upstream_is_sse
-            )
+                response.headers[key] = value
+            await response.prepare(req)
+            rewrite_sse = req.path == RESPONSES_PATH and upstream_is_sse
             pending = b""
             rewritten_calls = 0
             async for chunk in up.content.iter_any():
-                if chunk:
-                    if rewrite_sse:
-                        out, pending, changed = rewrite_sse_collaboration_calls(
-                            pending + chunk,
-                            normalize_function_args=normalize_function_args,
-                            namespaced_tools=namespaced_tools,
-                            custom_tool_names=custom_tool_names,
-                            custom_call_item_ids=custom_call_item_ids,
-                            rewrite_collaboration=collaboration_compatibility,
-                        )
-                        rewritten_calls += changed
-                        if out:
-                            await resp.write(out)
-                    else:
-                        await resp.write(chunk)
+                if not chunk:
+                    continue
+                if rewrite_sse:
+                    out, pending, changed = rewrite_sse_collaboration_calls(
+                        pending + chunk,
+                        normalize_function_args=normalize_function_args,
+                        namespaced_tools=namespaced_tools,
+                        custom_tool_names=custom_tool_names,
+                        custom_call_item_ids=custom_call_item_ids,
+                        rewrite_collaboration=collaboration_compatibility,
+                    )
+                    rewritten_calls += changed
+                    if out:
+                        await response.write(out)
+                else:
+                    await response.write(chunk)
             if rewrite_sse and pending:
                 out, _, changed = rewrite_sse_collaboration_calls(
                     pending,
@@ -1695,17 +1874,19 @@ async def handle(
                 )
                 rewritten_calls += changed
                 if out:
-                    await resp.write(out)
+                    await response.write(out)
             if rewritten_calls:
                 log.info(
                     "response compatibility: normalized_function_args_or_collaboration=%d",
                     rewritten_calls,
                 )
-            await resp.write_eof()
-            return resp
+            await response.write_eof()
+            return response
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:  # noqa: BLE001
         log.warning("backend request failed: %s", exc)
-        return aiohttp.web.Response(status=502, text="responses-proxy: backend unreachable")
+        return aiohttp.web.Response(status=502, text="unified-protocol-proxy: backend unreachable")
 
 
 async def main() -> None:
@@ -1719,7 +1900,9 @@ async def main() -> None:
         if len(sys.argv) > 4
         else str(Path(__file__).resolve().parents[1] / "litellm" / "config.runtime.yaml")
     )
-    responses_models, _ = load_protocol_models(config_path)
+    chat_backend = sys.argv[5] if len(sys.argv) > 5 else "http://127.0.0.1:4102"
+    responses_models, chat_models = load_protocol_models(config_path)
+    unified_models = responses_models | chat_models
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     # 桌面端打开会话会发送完整历史（+工具 schema），超过 aiohttp 默认
     # 1MB 请求体上限会返回 413；调大至 128MB。
@@ -1738,6 +1921,8 @@ async def main() -> None:
             session,
             control_plane_backend,
             responses_models,
+            chat_models,
+            chat_backend,
         ),
     )
     runner = aiohttp.web.AppRunner(app)
@@ -1745,10 +1930,12 @@ async def main() -> None:
     site = aiohttp.web.TCPSite(runner, "127.0.0.1", listen_port)
     await site.start()
     log.info(
-        "Responses proxy listening on 127.0.0.1:%s -> %s; control-plane -> %s",
+        "Unified protocol ingress listening on 127.0.0.1:%s -> %s; chat -> %s; control-plane -> %s; models=%d",
         listen_port,
         backend,
+        chat_backend,
         control_plane_backend,
+        len(unified_models),
     )
     while True:
         await asyncio.sleep(3600)

@@ -1,9 +1,10 @@
 """Chat Completions protocol forwarder.
 
-The listener on 127.0.0.1:4102 keeps the Chat Completions transport separate
-from the Responses listener on 127.0.0.1:4100.  It forwards requests to the
-LiteLLM listener on 127.0.0.1:4101 without changing the protocol or buffering
-streaming responses.
+The listener on 127.0.0.1:4102 is the Chat Completions forwarding hop and also
+remains available as a direct Chat entry point.  The unified listener on
+127.0.0.1:4100 may send chat-mode Responses requests here after conversion.
+This process forwards requests to 127.0.0.1:4101 without changing the Chat
+protocol or buffering streaming responses.
 
 The upstream OpenCode Go service requires an opaque session header for the
 chat-only deployment.  When that header is absent, this proxy adds it through

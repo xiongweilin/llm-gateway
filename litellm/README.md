@@ -6,27 +6,29 @@ configuration, and the conformance test environment.
 ## Architecture
 
 ```text
-Responses client
-    -> 4100 Responses protocol ingress
+Responses or Chat client
+    -> 4100 unified protocol ingress
     -> 4101 LiteLLM routing core
     -> upstream
 
-Chat Completions client
-    -> 4102 Chat Completions protocol ingress
+4100 Responses request for a chat-mode model
+    -> 4102 Chat Completions forwarding hop
     -> 4101 LiteLLM routing core
     -> upstream
 ```
 
-The ingress processes are protocol boundaries. They do not own runtime task
-lifecycle, authorization, tool execution, or completion semantics.
+The 4100 ingress is the public protocol boundary. The 4102 process remains a
+separate Chat Completions transport and direct entry point. Neither ingress
+owns runtime task lifecycle, authorization, tool execution, or completion
+semantics.
 
 ## Ports
 
 | Port | Role |
 | --- | --- |
-| `4100` | Responses protocol ingress |
+| `4100` | Unified Responses/Chat protocol ingress |
 | `4101` | Internal LiteLLM routing core |
-| `4102` | Chat Completions protocol ingress |
+| `4102` | Chat Completions forwarding hop and direct entry point |
 
 All listeners bind to `127.0.0.1` by default.
 
@@ -56,22 +58,26 @@ Each runtime model declares one protocol mode:
 - `responses`
 - `chat`
 
-The ingress model catalogs are derived from that mode. A model assigned to one
-mode is not exposed by the other protocol ingress.
+The 4100 catalog contains the union of both modes. The 4102 catalog contains
+only `chat` models. The mode also selects the internal upstream protocol when
+4100 receives a Responses request.
 
 ## Protocol ingress
 
-The Responses ingress accepts `POST /v1/responses`, `GET /v1/models`, and the
-local health endpoint. It also exposes the narrowly scoped `/v1/alpha/*`
-compatibility extension required by the deployment.
+The unified 4100 ingress accepts `POST /v1/responses` and
+`POST /v1/chat/completions`, plus `GET /v1/models` and the local health endpoint. It also
+exposes the narrowly scoped `/v1/alpha/*` compatibility extension required by
+the deployment. Responses requests for chat-mode models are converted to Chat
+Completions and sent through 4102.
 
-The Chat Completions ingress accepts `GET` or `POST /v1/chat/completions`,
-`GET /v1/models`, and the local health endpoint. It rejects Responses paths and
-the compatibility extension.
+The 4102 Chat Completions process accepts `GET` or `POST /v1/chat/completions`,
+plus `GET /v1/models` and the local health endpoint. It
+rejects Responses paths and the compatibility extension.
 
-Both ingress processes forward model traffic to the routing core. Responses
-transport handling includes request decompression, streaming passthrough, and
-non-streaming SSE aggregation where required by the client contract.
+The two transport processes forward model traffic to the routing core.
+Responses transport handling includes request decompression, streaming
+passthrough, non-streaming SSE aggregation, and the Responses-to-Chat
+conversion required by the unified 4100 entry point.
 
 ## Compatibility behavior
 

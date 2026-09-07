@@ -59,7 +59,7 @@ function Stop-Port([int]$Port, [string]$Label) {
 }
 
 Stop-Port -Port 4102 -Label 'Chat Completions ingress'
-Stop-Port -Port 4100 -Label 'Responses ingress'
+Stop-Port -Port 4100 -Label 'Unified protocol ingress'
 Stop-Port -Port 4101 -Label 'LiteLLM core'
 
 foreach ($pidFile in $pidFiles) {

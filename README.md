@@ -25,12 +25,19 @@ This repository does not own:
 ## Fixed topology
 
 ```text
-Responses client        -> 127.0.0.1:4100 -> 127.0.0.1:4101 -> upstream
-Chat Completions client -> 127.0.0.1:4102 -> 127.0.0.1:4101 -> upstream
+Responses or Chat client -> 127.0.0.1:4100 -> 127.0.0.1:4101 -> upstream
+                                     │
+                                     └─ Chat mode via 127.0.0.1:4102
+                                        -> 127.0.0.1:4101 -> upstream
 ```
 
-The two protocol ingress processes expose only their own protocol paths. The
-model catalog is derived from the protocol mode in `litellm/models.yaml`.
+Port 4100 is the unified public protocol ingress. It accepts both
+`/v1/responses` and `/v1/chat/completions`, and exposes the union of the
+runtime model catalog. A Responses request for a chat-mode model is converted
+and forwarded through the Chat Completions hop on port 4102. Port 4102 remains
+available as a direct Chat Completions entry point and exposes only chat-mode
+models. The model catalog is derived from the protocol mode in
+`litellm/models.yaml`.
 
 ## Repository layout
 
@@ -38,8 +45,10 @@ model catalog is derived from the protocol mode in `litellm/models.yaml`.
 - `litellm/config.runtime.template.yaml`: non-generated runtime settings.
 - `litellm/config.runtime.yaml`: generated runtime configuration.
 - `scripts/generate-runtime-config.ps1`: deterministic runtime config generator.
-- `tools/responses-proxy.py`: Responses protocol ingress.
-- `tools/chat-completions-proxy.py`: Chat Completions protocol ingress.
+- `tools/responses-proxy.py`: unified Responses/Chat protocol ingress and
+  Responses-to-Chat bridge.
+- `tools/chat-completions-proxy.py`: Chat Completions forwarding hop and direct
+  Chat entry point.
 - `tools/protocol_models.py`: runtime protocol catalog loader.
 
 The existing lifecycle script filenames are retained for scheduled-task

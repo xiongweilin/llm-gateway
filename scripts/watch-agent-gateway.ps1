@@ -1,4 +1,4 @@
-# Monitor the three local protocol endpoints and recover them when unhealthy.
+# Monitor the unified ingress, routing core, and Chat forwarding hop.
 # The filename is retained for the existing scheduled task.
 
 #Requires -Version 7.0

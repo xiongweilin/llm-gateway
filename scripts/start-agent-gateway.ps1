@@ -1,8 +1,9 @@
-# Start the protocol-specific ingress processes and the LiteLLM routing core.
+# Start the unified public protocol ingress, the internal Chat ingress, and the
+# LiteLLM routing core.
 #
-#   Responses protocol       -> 127.0.0.1:4100
-#   LiteLLM routing core     -> 127.0.0.1:4101
-#   Chat Completions protocol -> 127.0.0.1:4102
+#   Unified Responses/Chat ingress -> 127.0.0.1:4100
+#   LiteLLM routing core            -> 127.0.0.1:4101
+#   Chat Completions hop            -> 127.0.0.1:4102
 #
 # The filename is retained for existing scheduled-task and operator references.
 # Its public behavior and output are protocol-neutral.
@@ -24,6 +25,7 @@ $Python = Join-Path $Root 'litellm\.venv\Scripts\python.exe'
 $ServerEntry = Join-Path $Root 'litellm\run_server.py'
 $ResponsesIngress = Join-Path $Root 'tools\responses-proxy.py'
 $ChatIngress = Join-Path $Root 'tools\chat-completions-proxy.py'
+$ChatBackend = 'http://127.0.0.1:4102'
 
 $CoreOut = Join-Path $Root 'litellm\.litellm-core.out.log'
 $CoreErr = Join-Path $Root 'litellm\.litellm-core.err.log'
@@ -213,7 +215,7 @@ function Assert-CatalogMatches {
     $actualKey = (@($Actual | Sort-Object -Unique) -join "`n")
     $expectedKey = (@($Expected | Sort-Object -Unique) -join "`n")
     if ($actualKey -cne $expectedKey) {
-        throw "$Label model catalog does not match runtime protocol mode"
+        throw "$Label model catalog does not match runtime protocol assignment"
     }
 }
 
@@ -249,9 +251,14 @@ if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($protocolJson)) {
 $protocolModels = $protocolJson | ConvertFrom-Json
 $ExpectedResponses = @($protocolModels.responses | ForEach-Object { [string]$_ })
 $ExpectedChat = @($protocolModels.chat | ForEach-Object { [string]$_ })
+$ExpectedUnified = @(
+    @($ExpectedResponses) + @($ExpectedChat) |
+        ForEach-Object { [string]$_ } |
+        Sort-Object -Unique
+)
 
 Stop-OwnedPort -Port 4102 -Label 'Chat Completions ingress'
-Stop-OwnedPort -Port 4100 -Label 'Responses ingress'
+Stop-OwnedPort -Port 4100 -Label 'Unified protocol ingress'
 Stop-OwnedPort -Port 4101 -Label 'LiteLLM core'
 Remove-RuntimeArtifacts
 
@@ -279,19 +286,19 @@ try {
     $responses = Start-Process `
         -FilePath $Python `
         -WorkingDirectory $Root `
-        -ArgumentList @($ResponsesIngress, '4100', 'http://127.0.0.1:4101', $ControlPlaneBackend, $RuntimeConfig) `
+        -ArgumentList @($ResponsesIngress, '4100', 'http://127.0.0.1:4101', $ControlPlaneBackend, $RuntimeConfig, $ChatBackend) `
         -RedirectStandardOutput $ResponsesOut `
         -RedirectStandardError $ResponsesErr `
         -WindowStyle Hidden `
         -PassThru
     $responses.Id | Set-Content -LiteralPath $ResponsesPidFile
-    Wait-HttpReady -Uri 'http://127.0.0.1:4100/health/liveliness' -Label 'Responses ingress' -Attempts 40
+    Wait-HttpReady -Uri 'http://127.0.0.1:4100/health/liveliness' -Label 'Unified protocol ingress' -Attempts 40
     $responsesOwner = Get-PortOwner -Port 4100
     if ($null -eq $responsesOwner) {
-        throw 'Responses ingress health check passed without a listening process'
+        throw 'Unified protocol ingress health check passed without a listening process'
     }
     ([int]$responsesOwner.OwningProcess) | Set-Content -LiteralPath $ResponsesPidFile
-    Write-Host 'Responses ingress ready (127.0.0.1:4100)'
+    Write-Host 'Unified protocol ingress ready (127.0.0.1:4100)'
 
     $chat = Start-Process `
         -FilePath $Python `
@@ -313,22 +320,21 @@ try {
     if (-not $NoVerify) {
         $responseCatalog = Invoke-RestMethod -Uri 'http://127.0.0.1:4100/v1/models' -TimeoutSec 30
         $chatCatalog = Invoke-RestMethod -Uri 'http://127.0.0.1:4102/v1/models' -TimeoutSec 30
-        Assert-CatalogMatches -Label 'Responses ingress' -Actual (Get-CatalogIds $responseCatalog) -Expected $ExpectedResponses
+        Assert-CatalogMatches -Label 'Unified protocol ingress' -Actual (Get-CatalogIds $responseCatalog) -Expected $ExpectedUnified
         Assert-CatalogMatches -Label 'Chat Completions ingress' -Actual (Get-CatalogIds $chatCatalog) -Expected $ExpectedChat
 
-        $wrongResponses = Invoke-WebRequest -Uri 'http://127.0.0.1:4100/v1/chat/completions' -Method Get -TimeoutSec 10 -UseBasicParsing -SkipHttpErrorCheck
         $wrongChat = Invoke-WebRequest -Uri 'http://127.0.0.1:4102/v1/responses' -Method Get -TimeoutSec 10 -UseBasicParsing -SkipHttpErrorCheck
-        if ($wrongResponses.StatusCode -ne 404 -or $wrongChat.StatusCode -ne 404) {
-            throw 'protocol boundary verification failed'
+        if ($wrongChat.StatusCode -ne 404) {
+            throw 'Chat Completions hop protocol boundary verification failed'
         }
     }
 } catch {
     Show-LogTail -Label 'LiteLLM core stderr' -Path $CoreErr
-    Show-LogTail -Label 'Responses ingress stderr' -Path $ResponsesErr
+    Show-LogTail -Label 'Unified protocol ingress stderr' -Path $ResponsesErr
     Show-LogTail -Label 'Chat Completions ingress stderr' -Path $ChatErr
     foreach ($cleanup in @(
         @{ Port = 4102; Label = 'Chat Completions ingress' },
-        @{ Port = 4100; Label = 'Responses ingress' },
+        @{ Port = 4100; Label = 'Unified protocol ingress' },
         @{ Port = 4101; Label = 'LiteLLM core' }
     )) {
         try {

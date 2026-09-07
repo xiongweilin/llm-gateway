@@ -749,10 +749,10 @@ def test_control_plane_paths_bypass_litellm_without_changing_model_routes() -> N
 
 def test_responses_proxy_enforces_protocol_boundary_and_filters_models() -> None:
     assert proxy.is_allowed_path("/v1/responses", "POST")
+    assert proxy.is_allowed_path("/v1/chat/completions", "POST")
     assert proxy.is_allowed_path("/v1/models", "GET")
     assert proxy.is_allowed_path("/health/liveliness", "GET")
     assert proxy.is_allowed_path("/v1/alpha/search", "GET")
-    assert not proxy.is_allowed_path("/v1/chat/completions", "POST")
 
     upstream = json.dumps(
         {
@@ -763,8 +763,13 @@ def test_responses_proxy_enforces_protocol_boundary_and_filters_models() -> None
             ],
         }
     ).encode()
-    filtered = json.loads(proxy.filter_models_response(upstream, {"responses-model-a"}))
-    assert [item["id"] for item in filtered["data"]] == ["responses-model-a"]
+    filtered = json.loads(
+        proxy.filter_models_response(upstream, {"responses-model-a", "chat-model-a"})
+    )
+    assert [item["id"] for item in filtered["data"]] == [
+        "responses-model-a",
+        "chat-model-a",
+    ]
 
 
 def test_compatibility_features_are_shape_driven() -> None:

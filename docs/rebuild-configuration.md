@@ -45,14 +45,18 @@ the repository, configuration backups, or logs.
 ## Topology
 
 ```text
-4100  Responses protocol ingress
+4100  Unified Responses/Chat protocol ingress
 4101  LiteLLM routing core
-4102  Chat Completions protocol ingress
+4102  Chat Completions forwarding hop and direct entry point
 ```
 
-The two ingress processes forward model traffic to `127.0.0.1:4101`. The
-Responses ingress may also serve the deployment's `/v1/alpha/*`
-compatibility extension; that extension is separate from model routing.
+Port 4100 is the public entry point for both `POST /v1/responses` and
+`POST /v1/chat/completions`. Responses requests for chat-mode models are
+converted inside 4100 and forwarded to the Chat Completions hop on 4102;
+Responses-mode requests go directly to the routing core. Port 4102 also
+remains available as a direct Chat Completions entry point. The 4100 ingress
+may additionally serve the deployment's `/v1/alpha/*` compatibility
+extension; that extension is separate from model routing.
 
 ## Startup and stop commands
 
@@ -66,9 +70,9 @@ pwsh -NoProfile -File .\scripts\stop-agent-gateway.ps1
 ```
 
 Startup generates and validates the runtime configuration before replacing
-listeners. It then starts the routing core and the two protocol ingress
-processes, and verifies each protocol model catalog against the generated
-mode assignments.
+listeners. It then starts the routing core, the unified 4100 ingress, and the
+4102 Chat Completions hop, and verifies the unified and chat-only model
+catalogs against the generated mode assignments.
 
 ## Health endpoints
 
@@ -85,7 +89,8 @@ http://127.0.0.1:4100/v1/models
 http://127.0.0.1:4102/v1/models
 ```
 
-Each catalog is filtered by the `mode` field in the generated runtime
+The 4100 catalog contains the union of all assigned models. The 4102 catalog
+contains only models assigned to `chat` in the generated runtime
 configuration.
 
 ## Verification
