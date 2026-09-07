@@ -1602,7 +1602,11 @@ async def handle(
             if is_opencode_model(model) and has_namespaced_tools(request_obj):
                 namespaced_tools = collect_opencode_namespaced_tools(dec)
                 dec = normalize_opencode_namespaced_calls(dec)
-            if is_opencode_model(model) and isinstance(request_obj.get("tools"), list):
+            # Earlier compatibility steps may lift ``additional_tools`` into
+            # the top-level ``tools`` field.  Read the transformed body here;
+            # ``request_obj`` still describes the original request and can
+            # otherwise make the provider-specific sanitizers skip the tools.
+            if is_opencode_model(model):
                 dec = normalize_opencode_tool_descriptions(dec)
                 dec = normalize_tool_schemas(dec)
             dec, opencode_session = ensure_opencode_session(dec, req.headers)

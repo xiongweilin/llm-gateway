@@ -285,3 +285,90 @@ def test_unified_ingress_routes_responses_and_chat_to_chat_hop() -> None:
             await upstream_runner.cleanup()
 
     asyncio.run(run())
+
+
+def test_unified_ingress_sanitizes_tools_lifted_from_additional_tools() -> None:
+    async def run() -> None:
+        upstream_requests: list[dict] = []
+
+        async def upstream_handler(request: web.Request) -> web.Response:
+            upstream_requests.append(await request.json())
+            return web.json_response(
+                {
+                    "id": "resp_tool_description",
+                    "object": "response",
+                    "status": "completed",
+                    "output": [],
+                    "usage": {
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "total_tokens": 0,
+                    },
+                }
+            )
+
+        upstream_app = web.Application()
+        upstream_app.router.add_route("*", "/{tail:.*}", upstream_handler)
+        upstream_runner = web.AppRunner(upstream_app)
+        await upstream_runner.setup()
+        upstream_site = web.TCPSite(upstream_runner, "127.0.0.1", 0)
+        await upstream_site.start()
+        upstream_port = upstream_site._server.sockets[0].getsockname()[1]
+        upstream_url = f"http://127.0.0.1:{upstream_port}"
+
+        proxy_session = ClientSession()
+        proxy_app = web.Application()
+        proxy_app.router.add_route(
+            "*",
+            "/{tail:.*}",
+            lambda request: proxy.handle(
+                request,
+                upstream_url,
+                proxy_session,
+                None,
+                {"opencode-go/muse-spark-1.3-contributor"},
+                set(),
+                upstream_url,
+            ),
+        )
+        proxy_runner = web.AppRunner(proxy_app)
+        await proxy_runner.setup()
+        proxy_site = web.TCPSite(proxy_runner, "127.0.0.1", 0)
+        await proxy_site.start()
+        proxy_port = proxy_site._server.sockets[0].getsockname()[1]
+
+        try:
+            async with ClientSession() as client:
+                response = await client.post(
+                    f"http://127.0.0.1:{proxy_port}/v1/responses",
+                    json={
+                        "model": "opencode-go/muse-spark-1.3-contributor",
+                        "input": [
+                            {
+                                "type": "additional_tools",
+                                "role": "developer",
+                                "tools": [
+                                    {
+                                        "type": "function",
+                                        "name": "empty_description",
+                                        "description": "",
+                                        "parameters": {"type": "object", "properties": {}},
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                )
+                assert response.status == 200
+                await response.read()
+
+            assert len(upstream_requests) == 1
+            forwarded = upstream_requests[0]
+            assert forwarded["input"] == []
+            assert forwarded["tools"][0]["description"] == "empty_description tool"
+        finally:
+            await proxy_session.close()
+            await proxy_runner.cleanup()
+            await upstream_runner.cleanup()
+
+    asyncio.run(run())
