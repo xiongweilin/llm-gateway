@@ -126,6 +126,86 @@ def test_agent_message_conversion_is_scoped_to_opencode_plaintext() -> None:
     assert json.loads(proxy.normalize_agent_messages(json.dumps(chatgpt).encode())) == chatgpt
 
 
+def test_additional_tools_are_lifted_for_opencode() -> None:
+    request = {
+        "model": "opencode-go/muse-spark-1.3-contributor",
+        "input": [
+            {
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": [
+                    {
+                        "type": "namespace",
+                        "name": "local_collaboration",
+                        "tools": [
+                            {
+                                "type": "function",
+                                "name": "wait_agent",
+                                "parameters": {"type": "object"},
+                            }
+                        ],
+                    }
+                ],
+            },
+            {"type": "message", "role": "user", "content": []},
+        ],
+        "tools": [
+            {"type": "function", "name": "existing", "parameters": {"type": "object"}}
+        ],
+    }
+
+    normalized = json.loads(
+        proxy.normalize_opencode_additional_tools(json.dumps(request).encode())
+    )
+
+    assert [item["type"] for item in normalized["input"]] == ["message"]
+    assert [tool["name"] for tool in normalized["tools"]] == [
+        "existing",
+        "local_collaboration",
+    ]
+
+
+def test_additional_tools_are_unchanged_for_chatgpt() -> None:
+    request = {
+        "model": "gpt-5.6-luna",
+        "input": [{"type": "additional_tools", "tools": []}],
+    }
+    raw = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode()
+
+    assert proxy.normalize_opencode_additional_tools(raw) is raw
+
+
+def test_opencode_tool_descriptions_are_nonempty_and_scoped() -> None:
+    request = {
+        "model": "opencode-go/muse-spark-1.3-contributor",
+        "tools": [
+            {
+                "type": "namespace",
+                "name": "demo",
+                "description": " ",
+                "tools": [
+                    {"type": "function", "name": "missing", "description": ""},
+                ],
+            },
+            {"type": "function", "name": "omitted"},
+            {"type": "function", "name": "kept", "description": "Keep this"},
+        ],
+    }
+
+    normalized = json.loads(
+        proxy.normalize_opencode_tool_descriptions(json.dumps(request).encode())
+    )
+
+    assert normalized["tools"][0]["description"] == "demo tool"
+    assert normalized["tools"][0]["tools"][0]["description"] == "missing tool"
+    assert normalized["tools"][1]["description"] == "omitted tool"
+    assert normalized["tools"][2]["description"] == "Keep this"
+
+    request["model"] = "gpt-5.6-luna"
+    raw = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode()
+    assert proxy.normalize_opencode_tool_descriptions(raw) is raw
+
+
 def test_scalar_responses_input_is_normalized_for_chatgpt_backend() -> None:
     request = {"model": "gpt-5.6-luna", "input": "diagnose this alert"}
 

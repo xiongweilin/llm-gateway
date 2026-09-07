@@ -119,7 +119,9 @@ litellm/
 - 子智能体修复：代理临时别名化 `collaboration` 工具以关闭跨 provider 不可解密
   的消息参数，再把 `agent_message` 转成 OpenCode Go 能读取的标准 user message。
 - OpenCode Go supplemental route 已启用；代理仅对 `opencode-go/*` 请求执行
-  provider 限定的工具 schema、custom tool 和参数兼容转换，不改变 GPT 路由语义。
+  provider 限定的兼容转换：把 Codex 私有 `additional_tools` 提升为顶层
+  `tools`、补齐空的 function/namespace 描述、修正工具 schema、移除不支持的
+  custom tool 和参数兼容转换，不改变 GPT 路由语义。
 - 超长会话截断：超过 950k token 预算时代理截断最旧条目，并按 `call_id` 对账
   工具调用/输出配对，删除被截断调用遗留的孤儿 `function_call_output`，避免
   OpenCode Go 以 "No tool call found for tool output" 整体拒绝请求。

@@ -218,6 +218,114 @@ def normalize_agent_messages(body: bytes) -> bytes:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
 
 
+def normalize_opencode_additional_tools(body: bytes) -> bytes:
+    """Lift Codex-only ``additional_tools`` items into top-level ``tools``.
+
+    Codex includes its desktop/CLI tool declarations as a private Responses
+    input item.  ChatGPT understands that item type, but Console Go validates
+    every ``input`` item against the public Responses schema and rejects it.
+    OpenCode Go accepts the same declarations in the standard top-level
+    ``tools`` field, so move only that item for the OpenCode route.  Other
+    models keep the request byte-for-byte unchanged.
+    """
+    try:
+        obj = json.loads(body)
+    except Exception:
+        return body
+
+    model = obj.get("model")
+    inp = obj.get("input")
+    if (
+        not isinstance(model, str)
+        or not model.startswith("opencode-go/")
+        or not isinstance(inp, list)
+    ):
+        return body
+
+    kept = []
+    lifted = []
+    removed = 0
+    invalid = 0
+    for item in inp:
+        if not isinstance(item, dict) or item.get("type") != "additional_tools":
+            kept.append(item)
+            continue
+        extra_tools = item.get("tools")
+        if not isinstance(extra_tools, list):
+            kept.append(item)
+            invalid += 1
+            continue
+        lifted.extend(extra_tools)
+        removed += 1
+
+    if not removed:
+        if invalid:
+            log.warning(
+                "OpenCode Go additional_tools compatibility skipped: invalid=%d",
+                invalid,
+            )
+        return body
+
+    existing_tools = obj.get("tools")
+    if existing_tools is not None and not isinstance(existing_tools, list):
+        log.warning("OpenCode Go additional_tools compatibility skipped: top-level tools is not a list")
+        return body
+
+    obj["input"] = kept
+    if lifted:
+        obj["tools"] = (existing_tools or []) + lifted
+    log.info(
+        "OpenCode Go additional_tools compatibility: removed=%d lifted=%d invalid=%d",
+        removed,
+        len(lifted),
+        invalid,
+    )
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
+
+
+def normalize_opencode_tool_descriptions(body: bytes) -> bytes:
+    """Ensure OpenCode Go tool declarations have non-empty descriptions."""
+    try:
+        obj = json.loads(body)
+    except Exception:
+        return body
+
+    model = obj.get("model")
+    tools = obj.get("tools")
+    if (
+        not isinstance(model, str)
+        or not model.startswith("opencode-go/")
+        or not isinstance(tools, list)
+    ):
+        return body
+
+    fixed = 0
+
+    def visit(value) -> None:
+        nonlocal fixed
+        if isinstance(value, list):
+            for child in value:
+                visit(child)
+            return
+        if not isinstance(value, dict):
+            return
+        if value.get("type") in {"function", "namespace"}:
+            description = value.get("description")
+            if not isinstance(description, str) or not description.strip():
+                name = value.get("name")
+                label = name.strip() if isinstance(name, str) and name.strip() else "Codex"
+                value["description"] = f"{label} tool"
+                fixed += 1
+        for child in value.values():
+            visit(child)
+
+    visit(tools)
+    if not fixed:
+        return body
+    log.info("OpenCode Go tool description compatibility: fixed=%d", fixed)
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
+
+
 def normalize_tool_schemas(body: bytes) -> bytes:
     """Normalize function tool schemas for strict OpenCode Go validation.
 
@@ -753,8 +861,10 @@ async def handle(req: aiohttp.web.Request, backend: str, session: aiohttp.Client
         log.info("request summary %s", json.dumps(before, sort_keys=True))
         dec = normalize_scalar_responses_input(dec)
         dec = adapt_collaboration_request(dec)
+        dec = normalize_opencode_additional_tools(dec)
         dec = normalize_agent_messages(dec)
         dec = drop_opencode_custom_tools(dec)
+        dec = normalize_opencode_tool_descriptions(dec)
         dec = normalize_tool_schemas(dec)
         normalized = request_summary(dec)
         if normalized.get("input_types") != before.get("input_types"):

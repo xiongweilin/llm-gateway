@@ -1,4 +1,4 @@
-# Codex 模型路由桥接配置：Codex → LiteLLM → ChatGPT GPT family。
+# Codex 模型路由桥接配置：Codex → LiteLLM → ChatGPT GPT family / OpenCode Go。
 #
 # model_list 中 BEGIN/END GENERATED GPT MODELS 之间的内容由
 # sync-agent-gpt-models.ps1 从 Codex 运行时目录按统一三模型白名单生成；

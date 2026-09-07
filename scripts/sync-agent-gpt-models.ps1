@@ -410,7 +410,7 @@ $catalog = Read-ModelCatalog
 
 if ($CheckOnly) {
     $models = @(Get-AllowedModelSlugs -Catalog $catalog)
-    Write-Output "GPT 模型同步预览（统一保留 $($models.Count) 个）：$($models -join ', ')"
+    Write-Output "Codex 模型同步预览（统一保留 $($models.Count) 个受控模型）：$($models -join ', ')"
     exit 0
 }
 
@@ -446,11 +446,11 @@ try {
 
     if ($same) {
         Remove-Item -LiteralPath $tempPath -Force
-        Write-Host "GPT 模型配置无需更新（$($models.Count) 个）"
+        Write-Host "Codex 模型配置无需更新（$($models.Count) 个受控模型）"
     }
     else {
         Move-Item -LiteralPath $tempPath -Destination $OutputPath -Force
-        Write-Host "GPT 模型配置已同步（$($models.Count) 个）：$($models -join ', ')"
+        Write-Host "Codex 模型配置已同步（$($models.Count) 个受控模型）：$($models -join ', ')"
     }
 }
 catch {

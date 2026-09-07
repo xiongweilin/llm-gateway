@@ -1,13 +1,13 @@
 # 启动 Codex 模型路由桥接：
 #   Codex -> zstd 解压代理(127.0.0.1:4100)
 #         -> LiteLLM(127.0.0.1:4101)
-#         -> ChatGPT GPT family
+#         -> ChatGPT GPT family / OpenCode Go
 #
 # 用法:
 #   pwsh -NoProfile -File scripts\start-agent-gateway.ps1
 #   pwsh -NoProfile -File scripts\start-agent-gateway.ps1 -NoVerify
 #
-# 当前 GPT-only 路由复用 Codex 登录态，本脚本不读取 provider API key。
+# GPT 路由复用 Codex 登录态；OpenCode Go 路由只从环境变量读取 provider key。
 
 param(
     [switch]$NoVerify
@@ -190,7 +190,7 @@ if (-not (Test-Path $ProxyScript)) {
 }
 
 if (-not (Test-Path $ModelSyncScript)) {
-    Write-Error "GPT 模型同步脚本不存在: $ModelSyncScript"
+    Write-Error "Codex 模型同步脚本不存在: $ModelSyncScript"
 }
 
 if (-not (Test-Path $ConfigTemplate)) {
@@ -420,7 +420,7 @@ if (-not $NoVerify) {
             -Uri "http://127.0.0.1:4100/v1/models" `
             -TimeoutSec 30
 
-        Write-Host "验证通过：代理 -> LiteLLM -> GPT models=$($r.data.Count)"
+        Write-Host "验证通过：代理 -> LiteLLM -> models=$($r.data.Count)"
     }
     catch {
 
@@ -455,7 +455,7 @@ Write-Host ""
 Write-Host "Codex 网桥启动完成："
 Write-Host "  Codex      -> zstd proxy http://127.0.0.1:4100"
 Write-Host "  zstd proxy -> LiteLLM http://127.0.0.1:4101"
-Write-Host "  LiteLLM    -> ChatGPT GPT family"
+Write-Host "  LiteLLM    -> ChatGPT GPT family / OpenCode Go"
 Write-Host ""
 
 exit 0
