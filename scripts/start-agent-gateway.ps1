@@ -34,6 +34,11 @@ $ServerEntry = Join-Path $Root "litellm\run_server.py"
 $ModelSyncScript = Join-Path $Root "scripts\sync-agent-gpt-models.ps1"
 $ModelCatalog = Join-Path $env:USERPROFILE ".codex\models_cache.json"
 $ConfigTemplate = Join-Path $Root "litellm\config.agent.template.yaml"
+$ControlPlaneBackend = if ([string]::IsNullOrWhiteSpace($env:CHATGPT_API_BASE)) {
+    "https://chatgpt.com/backend-api/codex"
+} else {
+    $env:CHATGPT_API_BASE.TrimEnd("/")
+}
 
 
 # ------------------------------------------------------------
@@ -317,7 +322,8 @@ $proxy = Start-Process `
     -ArgumentList @(
         $ProxyScript,
         "4100",
-        "http://127.0.0.1:4101"
+        "http://127.0.0.1:4101",
+        $ControlPlaneBackend
     ) `
     -RedirectStandardOutput $ProxyOut `
     -RedirectStandardError $ProxyErr `
@@ -456,6 +462,7 @@ Write-Host "Codex 网桥启动完成："
 Write-Host "  Codex      -> zstd proxy http://127.0.0.1:4100"
 Write-Host "  zstd proxy -> LiteLLM http://127.0.0.1:4101"
 Write-Host "  LiteLLM    -> ChatGPT GPT family / OpenCode Go"
+Write-Host "  Control-plane /v1/alpha/* -> $ControlPlaneBackend"
 Write-Host ""
 
 exit 0

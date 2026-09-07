@@ -698,3 +698,89 @@ def test_truncate_input_never_leaves_orphaned_tool_outputs() -> None:
     assert call_ids == {"call_B"}
     assert not any(o["call_id"] not in call_ids for o in outputs)
     assert [o["call_id"] for o in outputs] == ["call_B"]
+
+
+def test_control_plane_paths_bypass_litellm_without_changing_model_routes() -> None:
+    model_backend = "http://127.0.0.1:4101"
+    control_plane_backend = "https://chatgpt.example/backend-api/codex"
+
+    assert proxy.is_control_plane_path("/v1/alpha/search")
+    assert proxy.is_control_plane_path("/v1/alpha")
+    assert not proxy.is_control_plane_path("/v1/alpha2/search")
+
+    assert (
+        proxy.select_upstream_backend(
+            "/v1/alpha/search",
+            model_backend,
+            control_plane_backend,
+        )
+        == control_plane_backend
+    )
+    assert (
+        proxy.select_upstream_backend(
+            "/v1/responses",
+            model_backend,
+            control_plane_backend,
+        )
+        == model_backend
+    )
+    assert (
+        proxy.select_upstream_backend(
+            "/v1/models",
+            model_backend,
+            control_plane_backend,
+        )
+        == model_backend
+    )
+    assert (
+        proxy.build_upstream_url(
+            control_plane_backend,
+            "/v1/alpha/search",
+            "q=1",
+            strip_v1_prefix=True,
+        )
+        == "https://chatgpt.example/backend-api/codex/alpha/search?q=1"
+    )
+    assert (
+        proxy.build_upstream_url(model_backend, "/v1/responses")
+        == "http://127.0.0.1:4101/v1/responses"
+    )
+
+
+def test_opencode_session_is_injected_without_touching_gpt_requests() -> None:
+    muse = {
+        "model": "opencode-go/muse-spark-1.3-contributor",
+        "input": [],
+        "extra_headers": {"x-client-header": "keep"},
+    }
+    body, session = proxy.ensure_opencode_session(
+        json.dumps(muse).encode(),
+        {"x-opencode-session": "provider-session-1"},
+    )
+    normalized = json.loads(body)
+    assert session == "provider-session-1"
+    assert normalized["extra_headers"] == {
+        "x-client-header": "keep",
+        "x-opencode-session": "provider-session-1",
+    }
+
+    codex_metadata = {"threadId": "thread-1", "turnId": "turn-1"}
+    first_body, first_session = proxy.ensure_opencode_session(
+        json.dumps({"model": "opencode-go/muse-spark-1.3-contributor"}).encode(),
+        {"x-codex-turn-metadata": json.dumps(codex_metadata)},
+    )
+    codex_metadata["turnId"] = "turn-2"
+    _, second_session = proxy.ensure_opencode_session(
+        json.dumps({"model": "opencode-go/muse-spark-1.3-contributor"}).encode(),
+        {"x-codex-turn-metadata": json.dumps(codex_metadata)},
+    )
+    assert json.loads(first_body)["extra_headers"]["x-opencode-session"] == first_session
+    assert first_session == second_session
+
+    gpt = {"model": "gpt-5.6-luna", "input": []}
+    unchanged, gpt_session = proxy.ensure_opencode_session(
+        json.dumps(gpt).encode(),
+        {"x-opencode-session": "must-not-be-added"},
+    )
+    assert json.loads(unchanged) == gpt
+    assert gpt_session is None

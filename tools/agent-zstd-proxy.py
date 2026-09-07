@@ -1,18 +1,25 @@
-"""Codex → LiteLLM 传输桥：解压 codex 的 zstd 请求体后转发到后端。
+"""Codex → LiteLLM / ChatGPT control-plane 传输桥。
 
 背景：codex CLI/桌面端把 /v1/responses 请求体以 `Content-Encoding: zstd`
 发送；LiteLLM(FastAPI) 不解压请求体，导致 model 字段解析失败（400
 model=None）。本代理在 127.0.0.1:4100 收请求，zstd 解压后转发到后端
 LiteLLM（默认 127.0.0.1:4101），并流式回传 SSE 响应。
 
+Codex 的网页搜索等 control-plane 请求使用 `/v1/alpha/*`，不属于
+LiteLLM 的模型 API；这些路径旁路到 ChatGPT control-plane upstream，
+并将上游路径映射为 `/alpha/*`。
+
 安全：仅绑定 loopback；不解析/不记录请求与响应内容；不含任何密钥。
 """
 import asyncio
+import hashlib
 import json
 import logging
 import math
 import sys
+import uuid
 from collections import Counter
+from collections.abc import Mapping
 
 import aiohttp
 import aiohttp.web
@@ -23,6 +30,11 @@ log = logging.getLogger("agent-zstd-proxy")
 # 低于 opencode-go 模型 1,048,576 token 上下文上限，给输出保留余量。
 # 这里只做异常请求的最后保护；正常增长与压缩由 Codex 自身管理。
 INPUT_TOKEN_BUDGET = 950_000
+DEFAULT_CONTROL_PLANE_BACKEND = "https://chatgpt.com/backend-api/codex"
+CONTROL_PLANE_PATH_PREFIX = "/v1/alpha"
+OPENCODE_SESSION_HEADER = "x-opencode-session"
+OPENCODE_MODEL_PREFIX = "opencode-go/"
+_OPENCODE_PROCESS_SESSION = f"codex-{uuid.uuid4().hex}"
 PLAINTEXT_COLLABORATION_TOOLS = {"spawn_agent", "send_message", "followup_task"}
 COLLABORATION_TOOLS = PLAINTEXT_COLLABORATION_TOOLS | {
     "interrupt_agent",
@@ -41,6 +53,180 @@ TOOL_OUTPUT_TYPES = {
     "local_shell_call_output",
 }
 TOOL_NAME_INPUT_TYPES = TOOL_CALL_TYPES | {"tool_search_call", "web_search_call"}
+
+
+def _header_value(headers: Mapping[str, str], name: str) -> str | None:
+    """Read a request header case-insensitively without exposing its value."""
+    expected = name.lower()
+    for key, value in headers.items():
+        if key.lower() == expected and isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _find_stable_session_value(value) -> str | None:
+    """Find a conversation-level identifier in Codex turn metadata."""
+    stable_keys = {
+        "threadid",
+        "thread_id",
+        "conversationid",
+        "conversation_id",
+        "sessionid",
+        "session_id",
+    }
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if str(key).lower() in stable_keys and isinstance(child, str) and child.strip():
+                return child.strip()
+        for child in value.values():
+            found = _find_stable_session_value(child)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = _find_stable_session_value(child)
+            if found:
+                return found
+    return None
+
+
+def _opaque_opencode_session(source: str) -> str:
+    """Convert a native Codex identifier into an opaque stable provider ID."""
+    digest = hashlib.sha256(f"opencode-session:{source}".encode()).hexdigest()
+    return f"codex-{digest[:32]}"
+
+
+def is_opencode_model(model: object) -> bool:
+    """Return whether a Responses request targets the OpenCode Go route."""
+    return isinstance(model, str) and (
+        model.startswith(OPENCODE_MODEL_PREFIX) or model.startswith("muse-spark-")
+    )
+
+
+def resolve_opencode_session(body: bytes, headers: Mapping[str, str]) -> str | None:
+    """Resolve a stable session ID for an OpenCode Go Responses request.
+
+    The provider accepts its own header, while Codex normally exposes the
+    same conversation through native thread metadata.  Keep the explicit
+    provider header verbatim; hash native IDs so proxy logs and provider
+    telemetry do not receive the local thread identifier itself.
+    """
+    try:
+        obj = json.loads(body)
+    except Exception:
+        return None
+    if not isinstance(obj, dict) or not is_opencode_model(obj.get("model")):
+        return None
+
+    extra_headers = obj.get("extra_headers")
+    if isinstance(extra_headers, dict):
+        explicit = _header_value(extra_headers, OPENCODE_SESSION_HEADER)
+        if explicit:
+            return explicit
+
+    explicit = _header_value(headers, OPENCODE_SESSION_HEADER)
+    if explicit:
+        return explicit
+
+    metadata_header = _header_value(headers, "x-codex-turn-metadata")
+    if metadata_header:
+        try:
+            native_id = _find_stable_session_value(json.loads(metadata_header))
+        except Exception:
+            native_id = None
+        if native_id:
+            return _opaque_opencode_session(native_id)
+
+    for header_name in (
+        "x-codex-parent-thread-id",
+        "x-codex-thread-id",
+        "x-codex-window-id",
+    ):
+        native_id = _header_value(headers, header_name)
+        if native_id:
+            return _opaque_opencode_session(native_id)
+
+    for key in (
+        "thread_id",
+        "threadId",
+        "conversation_id",
+        "conversationId",
+        "session_id",
+        "sessionId",
+    ):
+        value = obj.get(key)
+        if isinstance(value, str) and value.strip():
+            return _opaque_opencode_session(value.strip())
+
+    metadata = obj.get("metadata")
+    native_id = _find_stable_session_value(metadata)
+    if native_id:
+        return _opaque_opencode_session(native_id)
+
+    # A stable process fallback still satisfies the provider contract when an
+    # older Codex build exposes no native conversation identifier at all.
+    return _OPENCODE_PROCESS_SESSION
+
+
+def ensure_opencode_session(
+    body: bytes,
+    headers: Mapping[str, str],
+) -> tuple[bytes, str | None]:
+    """Add the provider session header to LiteLLM's Responses call only."""
+    session = resolve_opencode_session(body, headers)
+    if session is None:
+        return body, None
+
+    try:
+        obj = json.loads(body)
+    except Exception:
+        return body, None
+    extra_headers = obj.get("extra_headers")
+    if not isinstance(extra_headers, dict):
+        extra_headers = {}
+    extra_headers[OPENCODE_SESSION_HEADER] = session
+    obj["extra_headers"] = extra_headers
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode(), session
+
+
+def is_control_plane_path(path: str) -> bool:
+    """Return whether a Codex control-plane endpoint must bypass LiteLLM."""
+    return path == CONTROL_PLANE_PATH_PREFIX or path.startswith(
+        f"{CONTROL_PLANE_PATH_PREFIX}/"
+    )
+
+
+def select_upstream_backend(
+    path: str,
+    model_backend: str,
+    control_plane_backend: str | None,
+) -> str:
+    """Select the upstream without changing model Responses routing."""
+    if control_plane_backend and is_control_plane_path(path):
+        return control_plane_backend
+    return model_backend
+
+
+def build_upstream_url(
+    backend: str,
+    path: str,
+    query_string: str = "",
+    *,
+    strip_v1_prefix: bool = False,
+) -> str:
+    """Join an upstream base with the request path.
+
+    Codex addresses control-plane endpoints as ``/v1/alpha/*``, while the
+    ChatGPT control-plane base exposes the same endpoints as ``/alpha/*``.
+    Keep the translation opt-in so model routes retain their original path.
+    """
+    upstream_path = path
+    if strip_v1_prefix and upstream_path.startswith("/v1/"):
+        upstream_path = upstream_path[len("/v1") :]
+    url = f"{backend.rstrip('/')}{upstream_path}"
+    if query_string:
+        url += f"?{query_string}"
+    return url
 
 
 def _json_tokens(value) -> int:
@@ -1100,7 +1286,12 @@ def normalize_scalar_responses_input(body: bytes) -> bytes:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
 
 
-async def handle(req: aiohttp.web.Request, backend: str, session: aiohttp.ClientSession):
+async def handle(
+    req: aiohttp.web.Request,
+    backend: str,
+    session: aiohttp.ClientSession,
+    control_plane_backend: str | None = None,
+):
     # Codex 对 /v1/responses 总是先尝试 WebSocket 传输；本代理对 WS 返回
     # 426 UPGRADE_REQUIRED，Codex 据此干净回退到 HTTP（FallbackToHttp）。
     # 返回 404/405 会让桌面端进入重连循环。
@@ -1131,6 +1322,7 @@ async def handle(req: aiohttp.web.Request, backend: str, session: aiohttp.Client
     namespaced_tools: dict[str, tuple[str, str]] = {}
     custom_tool_names: set[str] = set()
     custom_call_item_ids: dict[str, str] = {}
+    opencode_session: str | None = None
     if req.method == "POST" and "/responses" in req.path:
         try:
             request_obj = json.loads(dec)
@@ -1153,6 +1345,7 @@ async def handle(req: aiohttp.web.Request, backend: str, session: aiohttp.Client
         dec = normalize_opencode_namespaced_calls(dec)
         dec = normalize_opencode_tool_descriptions(dec)
         dec = normalize_tool_schemas(dec)
+        dec, opencode_session = ensure_opencode_session(dec, req.headers)
         normalized = request_summary(dec)
         if normalized.get("input_types") != before.get("input_types"):
             log.info("request summary after compatibility %s", json.dumps(normalized, sort_keys=True))
@@ -1162,17 +1355,39 @@ async def handle(req: aiohttp.web.Request, backend: str, session: aiohttp.Client
             after = request_summary(dec)
             log.warning("request summary after truncation %s", json.dumps(after, sort_keys=True))
 
+    control_plane_route = is_control_plane_path(req.path)
+    using_control_plane = bool(control_plane_backend) and control_plane_route
     headers = {}
     for k, v in req.headers.items():
         lk = k.lower()
         if lk in ("host", "content-length", "content-encoding", "connection", "transfer-encoding"):
             continue
         headers[k] = v
+    if opencode_session:
+        headers[OPENCODE_SESSION_HEADER] = opencode_session
+    if using_control_plane:
+        # The bundled aiohttp runtime may not have optional Brotli support.
+        # Avoid asking the control-plane for br so its response can be
+        # forwarded without a client-side decompression failure.
+        for header_name in tuple(headers):
+            if header_name.lower() == "accept-encoding":
+                del headers[header_name]
+        headers["Accept-Encoding"] = "identity"
     headers["Content-Length"] = str(len(dec))
 
-    url = f"{backend}{req.path}"
-    if req.query_string:
-        url += f"?{req.query_string}"
+    upstream_backend = select_upstream_backend(
+        req.path,
+        backend,
+        control_plane_backend,
+    )
+    if upstream_backend != backend:
+        log.info("control-plane route: path=%s", req.path)
+    url = build_upstream_url(
+        upstream_backend,
+        req.path,
+        req.query_string,
+        strip_v1_prefix=using_control_plane,
+    )
     try:
         async with session.request(
             req.method, url, data=dec, headers=headers,
@@ -1269,18 +1484,33 @@ async def handle(req: aiohttp.web.Request, backend: str, session: aiohttp.Client
 async def main() -> None:
     listen_port = int(sys.argv[1]) if len(sys.argv) > 1 else 4100
     backend = sys.argv[2] if len(sys.argv) > 2 else "http://127.0.0.1:4101"
+    control_plane_backend = (
+        sys.argv[3] if len(sys.argv) > 3 else DEFAULT_CONTROL_PLANE_BACKEND
+    )
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     # 桌面端打开会话会发送完整历史（+工具 schema），超过 aiohttp 默认
     # 1MB 请求体上限会返回 413；调大至 128MB。
     app = aiohttp.web.Application(client_max_size=128 * 1024 * 1024)
     connector = aiohttp.TCPConnector(limit=64)
-    session = aiohttp.ClientSession(connector=connector)
-    app.router.add_route("*", "/{tail:.*}", lambda r: handle(r, backend, session))
+    # The Windows host may expose the public ChatGPT control-plane only via
+    # its system proxy.  Keep local 4101 traffic working as well; aiohttp's
+    # proxy discovery bypasses loopback for this host.
+    session = aiohttp.ClientSession(connector=connector, trust_env=True)
+    app.router.add_route(
+        "*",
+        "/{tail:.*}",
+        lambda r: handle(r, backend, session, control_plane_backend),
+    )
     runner = aiohttp.web.AppRunner(app)
     await runner.setup()
     site = aiohttp.web.TCPSite(runner, "127.0.0.1", listen_port)
     await site.start()
-    log.info("agent-zstd-proxy listening on 127.0.0.1:%s -> %s", listen_port, backend)
+    log.info(
+        "agent-zstd-proxy listening on 127.0.0.1:%s -> %s; control-plane -> %s",
+        listen_port,
+        backend,
+        control_plane_backend,
+    )
     while True:
         await asyncio.sleep(3600)
 

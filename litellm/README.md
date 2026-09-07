@@ -94,6 +94,10 @@ litellm/
 - 作用：Codex 统一经本项目 LiteLLM 路由到 ChatGPT 账号或 OpenCode Go。
 - 拓扑：Codex → zstd 解压代理(127.0.0.1:4100, `tools/agent-zstd-proxy.py`) →
   LiteLLM(127.0.0.1:4101, `config.agent.yaml`) → 原生 `/responses` 上游。
+- 路径边界：GPT/Muse 的模型推理都使用 `/v1/responses` 并进入 LiteLLM；Codex
+  宿主执行 `web__run` 时产生的 `/v1/alpha/*` control-plane 请求由 4100
+  旁路到 `https://chatgpt.com/backend-api/codex`，并将上游路径映射为
+  `/alpha/*`，避免被 LiteLLM 当作模型 API 返回 404。
 - 账号路由：GPT family 经 `chatgpt/` provider 走 OpenAI 账号（复用
   `~/.codex/auth.json` 登录态，无需 API key），默认 base
   `https://chatgpt.com/backend-api/codex`，消耗账号余额。
@@ -125,11 +129,17 @@ litellm/
   描述、修正工具 schema，不改变 GPT 路由语义。
 - OpenCode Go 路由的 LiteLLM `timeout`/`stream_timeout` 均为 3600 秒，代理总请求
   超时为 4200 秒，避免长时间推理期间上游暂时无 SSE 数据时提前关闭连接。
+- OpenCode Go 的每个 Responses 请求都会由 4100 代理补入 `x-opencode-session`：
+  优先保留客户端会话头，其次使用 Codex 线程元数据生成稳定的不透明标识，并经
+  LiteLLM `extra_headers` 传给 Console Go；GPT 请求不注入该头。
 - 超长会话截断：超过 950k token 预算时代理截断最旧条目，并按 `call_id` 对账
   工具调用/输出配对，删除被截断调用遗留的孤儿 `function_call_output`，避免
   OpenCode Go 以 "No tool call found for tool output" 整体拒绝请求。
-- 网页检索修复：ChatGPT provider 即使收到 `stream:false` 仍返回 SSE；代理聚合
+- 网页检索修复：GPT 的 provider-native `web_search` 仍走 `/v1/responses`；ChatGPT provider 即使收到 `stream:false` 仍返回 SSE；代理聚合
   `response.output_item.done`/`response.completed`，返回标准 Responses JSON。
+- Muse 的 `/v1/responses` 仍走 OpenCode Go；当 Muse 通过 `exec` 调用
+  `tools.web__run(...)` 时，搜索由 Codex 宿主执行，使用独立的 `/v1/alpha/*`
+  control-plane 旁路。这不是把 Muse 模型请求切换到 ChatGPT。
 - 日志只记录请求大小、item 类型/计数、工具数量和转换计数，不记录正文或参数。
 - zstandard 依赖已加入 pyproject/uv.lock；`uv sync --locked` 可复现。
 - GPT 路由复用 `~/.codex/auth.json` 登录态，不需要 provider API key；OpenCode Go
