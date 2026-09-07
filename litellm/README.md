@@ -112,7 +112,8 @@ litellm/
   OpenCode Go 模型通过 `openai/muse-spark-1.3-contributor`（Responses）与
   `openai/chat_completions/omen-alpha`（LiteLLM Responses -> Chat Completions bridge）经由
   `https://opencode.ai/zen/go/v1` 转发；脚本每次运行都会保留这五个受控条目，
-  不会因 Codex 缓存刷新而产生目录分叉。
+  不会因 Codex 缓存刷新而产生目录分叉。Omen deployment 仅本地启用
+  `drop_params: true`，用于丢弃 Omen 不支持的 `reasoning_effort`，不影响 GPT/Muse。
   网关重启后即可加载新的 LiteLLM 列表，Codex Desktop/CLI 重新启动后即可重新读取模型目录。
 - 运行中的网关不会因模型目录变化而后台重启；这样避免中断活动 Codex 请求。
   若要立即应用新列表，请在当前请求结束后运行

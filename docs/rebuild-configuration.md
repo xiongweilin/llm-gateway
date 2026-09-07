@@ -13,7 +13,9 @@
 - GPT 与 OpenCode Go 模型的 Codex 请求都从 `/v1/responses` 进入 4100 -> 4101；
   Muse 上游使用 Responses，Omen Alpha 通过 LiteLLM 的
   `openai/chat_completions/omen-alpha` 模型前缀桥接到 OpenCode Go 的
-  `/chat/completions`；单独设置 `model_info.mode: chat` 不会触发该桥接；Codex 宿主执行
+  `/chat/completions`；单独设置 `model_info.mode: chat` 不会触发该桥接。
+  Omen deployment 单独启用 `drop_params: true`，丢弃 Codex 自动携带但 Omen 不支持的
+  `reasoning_effort`，不启用全局丢参；Codex 宿主执行
   `web__run` 时产生的 `/v1/alpha/*` control-plane 请求由 4100 旁路到
   `https://chatgpt.com/backend-api/codex`（上游路径为 `/alpha/*`），不送入
   LiteLLM。
