@@ -1,7 +1,7 @@
 # litellm-gateway —— 项目内独立 LiteLLM 模型网关
 
-> 为个人 Agent 项目提供独立的 LiteLLM 模型网关组件。Codex 当前使用
-> `config.agent.yaml` 路由。
+> 为个人 Agent 项目提供独立的 LiteLLM 模型网关组件；运行配置使用
+> `config.agent.yaml`。
 
 ## 特性
 
@@ -33,7 +33,7 @@ uv sync --locked
 
 ## 配置
 
-Conformance 环境的配置事实源是 [config.yaml](config.yaml)；Codex 路由的配置事实源是
+Conformance 环境的配置事实源是 [config.yaml](config.yaml)；运行路由的配置事实源是
 [config.agent.yaml](config.agent.yaml)。运行 conformance 前需注入环境变量：
 
 ```powershell
@@ -89,64 +89,28 @@ litellm/
     └── test_conformance.py
 ```
 
-### Codex 模型路由桥接（config.agent.yaml + scripts/start-agent-gateway.ps1）
+### 协议入口与模型路由（config.agent.yaml + scripts/start-agent-gateway.ps1）
 
-- 作用：Codex 统一经本项目 LiteLLM 路由到 ChatGPT 账号或 OpenCode Go。
-- 拓扑：Codex → zstd 解压代理(127.0.0.1:4100, `tools/agent-zstd-proxy.py`) →
-  LiteLLM(127.0.0.1:4101, `config.agent.yaml`) → OpenCode Go 原生 `/responses`
-  或 `/chat/completions` 上游。
-- 路径边界：GPT 与 OpenCode Go 模型的 Codex 请求都使用 `/v1/responses` 并进入 LiteLLM；Codex
-  宿主执行 `web__run` 时产生的 `/v1/alpha/*` control-plane 请求由 4100
-  旁路到 `https://chatgpt.com/backend-api/codex`，并将上游路径映射为
-  `/alpha/*`，避免被 LiteLLM 当作模型 API 返回 404。
-- 账号路由：GPT family 经 `chatgpt/` provider 走 OpenAI 账号（复用
-  `~/.codex/auth.json` 登录态，无需 API key），默认 base
-  `https://chatgpt.com/backend-api/codex`，消耗账号余额。
-- 模型列表由 `scripts/sync-agent-gpt-models.ps1` 在网关启动前生成：统一同步
-  `%USERPROFILE%\.codex\models_cache.json`、Codex 可解析的
-  `%USERPROFILE%\.codex\models.json` 和 LiteLLM `model_list`。三个 GPT 模型由
-  生成区块维护，OpenCode Go supplemental models
-  `opencode-go/muse-spark-1.3-contributor` 与 `opencode-go/omen-alpha` 由模板中的固定路由维护；五个模型会
-  同步进入 Codex 两个目录，并确保 `config.toml` 的 `model_catalog_json` 引用
-  `models.json`。GPT 模型通过 `chatgpt/<official-model>` provider route 转发，
-  OpenCode Go 模型通过 `openai/muse-spark-1.3-contributor`（Responses）与
-  `openai/chat_completions/omen-alpha`（LiteLLM Responses -> Chat Completions bridge）经由
-  `https://opencode.ai/zen/go/v1` 转发；脚本每次运行都会保留这五个受控条目，
-  不会因 Codex 缓存刷新而产生目录分叉。Omen deployment 仅本地启用
-  `drop_params: true`，用于丢弃 Omen 不支持的 `reasoning_effort`，不影响 GPT/Muse。
-  网关重启后即可加载新的 LiteLLM 列表，Codex Desktop/CLI 重新启动后即可重新读取模型目录。
-- 运行中的网关不会因模型目录变化而后台重启；这样避免中断活动 Codex 请求。
-  若要立即应用新列表，请在当前请求结束后运行
-  `scripts/start-agent-gateway.ps1`。
-- 为什么需要代理：codex 请求体带 `Content-Encoding: zstd`，LiteLLM/FastAPI
-  不解压导致 model=None（400）；aiohttp 3.14 会自动解压 zstd，代理据此仅对
-  仍以 zstd magic 开头的 body 手动解压。
-- 上下文修复：启动脚本用最小 `CHATGPT_DEFAULT_INSTRUCTIONS` 覆盖 LiteLLM
-  1.96.0 每请求重复注入的 7.5 KB 旧 Codex 提示，不降低模型的 1M 窗口。
-- 子智能体修复：代理临时别名化 `collaboration` 工具以关闭跨 provider 不可解密
-  的消息参数，再把 `agent_message` 转成 OpenCode Go 能读取的标准 user message。
-- OpenCode Go supplemental route 已启用；代理仅对 `opencode-go/*` 请求执行
-  provider 限定的兼容转换：把 Codex 私有 `additional_tools` 提升为顶层
-  `tools`、把 Codex `custom_tool_call` 临时桥接为单字符串 function、恢复响应
-  中的 custom call、修复 namespace 函数的扁平化名称、补齐空的 function/namespace
-  描述、修正工具 schema，不改变 GPT 路由语义。
-- OpenCode Go 路由的 LiteLLM `timeout`/`stream_timeout` 均为 3600 秒，代理总请求
-  超时为 4200 秒，避免长时间推理期间上游暂时无 SSE 数据时提前关闭连接。
-- OpenCode Go 的每个 Responses 请求都会由 4100 代理补入 `x-opencode-session`：
-  优先保留客户端会话头，其次使用 Codex 线程元数据生成稳定的不透明标识，并经
-  LiteLLM `extra_headers` 传给 Console Go；GPT 请求不注入该头。
-- 超长会话截断：超过 950k token 预算时代理截断最旧条目，并按 `call_id` 对账
-  工具调用/输出配对，删除被截断调用遗留的孤儿 `function_call_output`，避免
-  OpenCode Go 以 "No tool call found for tool output" 整体拒绝请求。
-- 网页检索修复：GPT 的 provider-native `web_search` 仍走 `/v1/responses`；ChatGPT provider 即使收到 `stream:false` 仍返回 SSE；代理聚合
-  `response.output_item.done`/`response.completed`，返回标准 Responses JSON。
-- Muse 的 `/v1/responses` 仍走 OpenCode Go；当 Muse 通过 `exec` 调用
-  `tools.web__run(...)` 时，搜索由 Codex 宿主执行，使用独立的 `/v1/alpha/*`
-  control-plane 旁路。这不是把 Muse 模型请求切换到 ChatGPT。
-- 日志只记录请求大小、item 类型/计数、工具数量和转换计数，不记录正文或参数。
-- zstandard 依赖已加入 pyproject/uv.lock；`uv sync --locked` 可复现。
-- GPT 路由复用 `~/.codex/auth.json` 登录态，不需要 provider API key；OpenCode Go
-  路由只通过当前用户环境变量 `OPENCODEGO_API_KEY` 注入凭据，不能写入任何配置、
-  日志或仓库。
-- `scripts/start-agent-gateway.ps1` 会替换 4100/4101 监听；不要在仍有活动 Codex
-  请求时执行。
+- 拓扑固定为：Responses `127.0.0.1:4100`、Chat Completions
+  `127.0.0.1:4102`，二者都转发到 LiteLLM `127.0.0.1:4101`。
+- 4100 负责 Responses 兼容和 zstd 请求体解压；`/v1/alpha/*` 是现有
+  control-plane 旁路，不作为模型 API 送入 LiteLLM。
+- 4102 只负责 Chat Completions 转发，保留 SSE，不把 Chat 请求转换成
+  Responses。上游需要会话头的模型由该入口补入 `extra_headers`，其他模型的
+  请求体保持不变。
+- 模型路由分开维护：GPT 使用 `chatgpt/<model>`；Muse 使用上游 Responses
+  路由；Omen 同时保留 Responses 兼容别名 `opencode-go/omen-alpha`，并新增
+  Chat Completions 原生别名 `omen-alpha`。Omen deployment 仅本地启用
+  `drop_params: true`，丢弃不支持的 `reasoning_effort`，不启用全局丢参。
+- 模型目录由 `scripts/sync-agent-gpt-models.ps1` 生成区块维护；非生成路由由
+  `config.agent.template.yaml` 持有。这样目录刷新不会删除协议路由。
+- Responses 入口保留必要的工具兼容、会话头、超长输入截断和非流式 SSE 聚合；
+  这些转换只在对应请求形状/模型路由上触发，不改变 GPT 的正常路由。
+- 两个协议入口的上游请求超时为 4200 秒，LiteLLM 与上游部署的超时为 3600 秒，
+  覆盖长时间推理的流式空闲间隔。
+- GPT 路由复用 `~/.codex/auth.json` 登录态，不需要 provider API key；上游
+  provider key 只通过当前用户环境变量 `OPENCODEGO_API_KEY` 注入，不能写入
+  配置、日志或仓库。
+- 启动脚本会替换 4100/4101/4102 监听；不要在仍有活动请求时执行。模型列表和
+  配置变更需要由用户在安全时机运行 `scripts/start-agent-gateway.ps1`，并重新
+  启动需要重新读取配置的客户端。

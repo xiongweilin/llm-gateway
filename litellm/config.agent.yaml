@@ -1,14 +1,14 @@
-# Codex 模型路由桥接配置：Codex → LiteLLM → ChatGPT GPT family / OpenCode Go。
+# 协议入口配置：Responses/Chat Completions → LiteLLM → 上游模型。
 #
 # model_list 中 BEGIN/END GENERATED GPT MODELS 之间的内容由
-# sync-agent-gpt-models.ps1 从 Codex 运行时目录按统一三模型白名单生成；
+# sync-agent-gpt-models.ps1 从运行时模型目录按统一三模型白名单生成；
 # models_cache.json、models.json 与本文件的 GPT model_list 保持一致；
-# OpenCode Go supplemental route 位于生成区块之外，由本模板持有。
+# 非生成路由位于生成区块之外，由本模板持有。
 #
 # 安全约定：
 # - 密钥只经环境变量注入，绝不写入本文件/日志/仓库。
 # - 仅绑定 127.0.0.1；默认无 master key（本地信任模型）。
-# - num_retries=0：重试所有权归调用方（Codex/daemon），LiteLLM 只转发一次。
+# - num_retries=0：重试所有权归调用方，LiteLLM 只转发一次。
 model_list:
   # BEGIN GENERATED GPT MODELS
   - model_name: 'gpt-5.6-sol'
@@ -30,7 +30,7 @@ model_list:
       model: 'chatgpt/gpt-5.6-luna'
       timeout: 900
   # END GENERATED GPT MODELS
-  # OpenCode Go supplemental model；密钥只从当前用户环境变量注入。
+  # Responses 路由；密钥只从当前用户环境变量注入。
   - model_name: 'opencode-go/muse-spark-1.3-contributor'
     model_info:
       mode: responses
@@ -40,17 +40,35 @@ model_list:
       api_key: os.environ/OPENCODEGO_API_KEY
       timeout: 3600
       stream_timeout: 3600
-  # Omen Alpha exposes OpenAI-compatible Chat Completions; LiteLLM bridges
-  # Codex's Responses request to the provider-specific endpoint.
+  # Responses 原生别名，供使用裸模型 ID 的客户端调用。
+  - model_name: 'muse-spark-1.3-contributor'
+    model_info:
+      mode: responses
+    litellm_params:
+      model: 'openai/muse-spark-1.3-contributor'
+      api_base: https://opencode.ai/zen/go/v1
+      api_key: os.environ/OPENCODEGO_API_KEY
+      timeout: 3600
+      stream_timeout: 3600
+  # Responses 兼容路由：上游只提供 Chat Completions，LiteLLM 负责协议桥接。
   - model_name: 'opencode-go/omen-alpha'
     model_info:
       mode: chat
     litellm_params:
-      # The prefix makes LiteLLM's /v1/responses route use its
-      # Responses -> Chat Completions bridge for this chat-only model.
+      # 此前缀让 LiteLLM 的 Responses 入口使用 Chat Completions 桥接。
       model: 'openai/chat_completions/omen-alpha'
-      # Codex may send reasoning_effort; Omen does not expose that OpenAI
-      # parameter, so drop it for this deployment only.
+      # 调用方可能携带 reasoning_effort；上游不支持该参数，仅此部署丢弃。
+      drop_params: true
+      api_base: https://opencode.ai/zen/go/v1
+      api_key: os.environ/OPENCODEGO_API_KEY
+      timeout: 3600
+      stream_timeout: 3600
+  # Chat Completions 原生路由；入口为 127.0.0.1:4102。
+  - model_name: 'omen-alpha'
+    model_info:
+      mode: chat
+    litellm_params:
+      model: 'openai/omen-alpha'
       drop_params: true
       api_base: https://opencode.ai/zen/go/v1
       api_key: os.environ/OPENCODEGO_API_KEY

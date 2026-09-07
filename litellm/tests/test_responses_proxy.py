@@ -2,7 +2,7 @@ import importlib.util
 import json
 from pathlib import Path
 
-PROXY_PATH = Path(__file__).parents[2] / "tools" / "agent-zstd-proxy.py"
+PROXY_PATH = Path(__file__).parents[2] / "tools" / "responses-proxy.py"
 SPEC = importlib.util.spec_from_file_location("agent_zstd_proxy", PROXY_PATH)
 assert SPEC and SPEC.loader
 proxy = importlib.util.module_from_spec(SPEC)

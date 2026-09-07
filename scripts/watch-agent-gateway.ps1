@@ -42,7 +42,8 @@ function Write-WatchdogLog([string]$Message) {
 function Test-GatewayHealthy {
     foreach ($url in @(
         'http://127.0.0.1:4100/health/liveliness',
-        'http://127.0.0.1:4101/health/liveliness'
+        'http://127.0.0.1:4101/health/liveliness',
+        'http://127.0.0.1:4102/health/liveliness'
     )) {
         try {
             $response = Invoke-WebRequest -Uri $url -TimeoutSec 3 -SkipHttpErrorCheck
@@ -107,7 +108,7 @@ try {
         $healthy = Test-GatewayHealthy
         if (-not $healthy) {
             if ($lastHealthy -ne $false) {
-                Write-WatchdogLog '4100/4101 健康检查失败，开始恢复网关'
+                Write-WatchdogLog '4100/4101/4102 健康检查失败，开始恢复网关'
             }
             $exitCode = Invoke-GatewayStart
             if ($exitCode -eq 0 -and (Test-GatewayHealthy)) {

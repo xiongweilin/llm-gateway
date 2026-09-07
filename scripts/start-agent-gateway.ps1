@@ -1,13 +1,12 @@
-# 启动 Codex 模型路由桥接：
-#   Codex -> zstd 解压代理(127.0.0.1:4100)
-#         -> LiteLLM(127.0.0.1:4101)
-#         -> ChatGPT GPT family / OpenCode Go
+# 启动协议入口：
+#   Responses       -> 127.0.0.1:4100 -> LiteLLM 127.0.0.1:4101
+#   Chat Completions -> 127.0.0.1:4102 -> LiteLLM 127.0.0.1:4101
 #
 # 用法:
 #   pwsh -NoProfile -File scripts\start-agent-gateway.ps1
 #   pwsh -NoProfile -File scripts\start-agent-gateway.ps1 -NoVerify
 #
-# GPT 路由复用 Codex 登录态；OpenCode Go 路由只从环境变量读取 provider key。
+# 上游凭据只从当前用户环境变量读取。
 
 param(
     [switch]$NoVerify
@@ -22,14 +21,19 @@ $Cfg = Join-Path $Root "litellm\config.agent.yaml"
 $LogOut = Join-Path $Root "litellm\.agent-gateway.out.log"
 $LogErr = Join-Path $Root "litellm\.agent-gateway.err.log"
 
-$ProxyOut = Join-Path $Root "litellm\.agent-proxy.out.log"
-$ProxyErr = Join-Path $Root "litellm\.agent-proxy.err.log"
+$ResponsesProxyOut = Join-Path $Root "litellm\.responses-proxy.out.log"
+$ResponsesProxyErr = Join-Path $Root "litellm\.responses-proxy.err.log"
+$ChatProxyOut = Join-Path $Root "litellm\.chat-completions-proxy.out.log"
+$ChatProxyErr = Join-Path $Root "litellm\.chat-completions-proxy.err.log"
 
 $PidFile = Join-Path $Root "litellm\.agent-gateway.pid"
-$ProxyPidFile = Join-Path $Root "litellm\.agent-proxy.pid"
+$ResponsesProxyPidFile = Join-Path $Root "litellm\.responses-proxy.pid"
+$ChatProxyPidFile = Join-Path $Root "litellm\.chat-completions-proxy.pid"
+$LegacyProxyPidFile = Join-Path $Root "litellm\.agent-proxy.pid"
 
 $VenvPython = Join-Path $Root "litellm\.venv\Scripts\python.exe"
-$ProxyScript = Join-Path $Root "tools\agent-zstd-proxy.py"
+$ResponsesProxyScript = Join-Path $Root "tools\responses-proxy.py"
+$ChatProxyScript = Join-Path $Root "tools\chat-completions-proxy.py"
 $ServerEntry = Join-Path $Root "litellm\run_server.py"
 $ModelSyncScript = Join-Path $Root "scripts\sync-agent-gpt-models.ps1"
 $ModelCatalog = Join-Path $env:USERPROFILE ".codex\models_cache.json"
@@ -90,7 +94,8 @@ function Stop-OwnPortOwner {
     # 未知进程继续 fail closed。
     if (
         $cmd -match 'config\.agent\.yaml' -or
-        $cmd -match 'agent-zstd-proxy\.py' -or
+        ($cmd -match 'responses-proxy\.py' -or $cmd -match 'agent-zstd-proxy\.py') -or
+        $cmd -match 'chat-completions-proxy\.py' -or
         $cmd -match 'gateway[\\/]+litellm'
     ) {
         $killPid = $ownerPid
@@ -146,7 +151,8 @@ function Stop-BridgePort {
 
     if (
         $cmd -match 'config\.agent\.yaml' -or
-        $cmd -match 'agent-zstd-proxy\.py' -or
+        ($cmd -match 'responses-proxy\.py' -or $cmd -match 'agent-zstd-proxy\.py') -or
+        $cmd -match 'chat-completions-proxy\.py' -or
         $cmd -match 'gateway[\\/]+litellm'
     ) {
         & taskkill /PID $ownerPid /T /F 2>$null | Out-Null
@@ -190,8 +196,12 @@ if (-not (Test-Path $VenvPython)) {
     Write-Error "Python venv 不存在: $VenvPython"
 }
 
-if (-not (Test-Path $ProxyScript)) {
-    Write-Error "zstd proxy 脚本不存在: $ProxyScript"
+if (-not (Test-Path $ResponsesProxyScript)) {
+    Write-Error "Responses 代理脚本不存在: $ResponsesProxyScript"
+}
+
+if (-not (Test-Path $ChatProxyScript)) {
+    Write-Error "Chat Completions 代理脚本不存在: $ChatProxyScript"
 }
 
 if (-not (Test-Path $ModelSyncScript)) {
@@ -217,11 +227,14 @@ if (-not (Test-Path -LiteralPath $Cfg)) {
 # 2. 清理本桥遗留监听
 # ------------------------------------------------------------
 
-Stop-OwnPortOwner -Port 4100 -Tag "zstd 代理(4100)"
+Stop-OwnPortOwner -Port 4102 -Tag "Chat Completions 代理(4102)"
+Stop-OwnPortOwner -Port 4100 -Tag "Responses 代理(4100)"
 Stop-OwnPortOwner -Port 4101 -Tag "LiteLLM(4101)"
 
 Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
-Remove-Item $ProxyPidFile -Force -ErrorAction SilentlyContinue
+Remove-Item $ResponsesProxyPidFile -Force -ErrorAction SilentlyContinue
+Remove-Item $ChatProxyPidFile -Force -ErrorAction SilentlyContinue
+Remove-Item $LegacyProxyPidFile -Force -ErrorAction SilentlyContinue
 
 
 # ------------------------------------------------------------
@@ -230,8 +243,10 @@ Remove-Item $ProxyPidFile -Force -ErrorAction SilentlyContinue
 
 Remove-Item $LogOut -Force -ErrorAction SilentlyContinue
 Remove-Item $LogErr -Force -ErrorAction SilentlyContinue
-Remove-Item $ProxyOut -Force -ErrorAction SilentlyContinue
-Remove-Item $ProxyErr -Force -ErrorAction SilentlyContinue
+Remove-Item $ResponsesProxyOut -Force -ErrorAction SilentlyContinue
+Remove-Item $ResponsesProxyErr -Force -ErrorAction SilentlyContinue
+Remove-Item $ChatProxyOut -Force -ErrorAction SilentlyContinue
+Remove-Item $ChatProxyErr -Force -ErrorAction SilentlyContinue
 
 
 # ------------------------------------------------------------
@@ -310,33 +325,33 @@ $litePid = $liteConn.OwningProcess
 # pidfile 更新成真正监听 4101 的 PID。
 $litePid | Set-Content $PidFile
 
-Write-Host "LiteLLM codex 网关就绪（127.0.0.1:4101，pid=$litePid）"
+Write-Host "LiteLLM 后端就绪（127.0.0.1:4101，pid=$litePid）"
 
 
 # ------------------------------------------------------------
-# 6. 启动 zstd proxy :4100 -> :4101
+# 6. 启动 Responses 代理 :4100 -> :4101
 # ------------------------------------------------------------
 
 $proxy = Start-Process `
     -FilePath $VenvPython `
     -ArgumentList @(
-        $ProxyScript,
+        $ResponsesProxyScript,
         "4100",
         "http://127.0.0.1:4101",
         $ControlPlaneBackend
     ) `
-    -RedirectStandardOutput $ProxyOut `
-    -RedirectStandardError $ProxyErr `
+    -RedirectStandardOutput $ResponsesProxyOut `
+    -RedirectStandardError $ResponsesProxyErr `
     -WindowStyle Hidden `
     -PassThru
 
-$proxy.Id | Set-Content $ProxyPidFile
+$proxy.Id | Set-Content $ResponsesProxyPidFile
 
-Write-Host "zstd 代理启动命令已执行 pid=$($proxy.Id)"
+Write-Host "Responses 代理启动命令已执行 pid=$($proxy.Id)"
 
 
 # ------------------------------------------------------------
-# 7. 等待 zstd proxy :4100
+# 7. 等待 Responses 代理 :4100
 # ------------------------------------------------------------
 
 $proxyReady = $false
@@ -359,21 +374,21 @@ for ($i = 0; $i -lt 40; $i++) {
         if ($proxy.HasExited) {
 
             Show-LogTail `
-                -Title "zstd proxy stderr" `
-                -Path $ProxyErr `
+                -Title "Responses 代理 stderr" `
+                -Path $ResponsesProxyErr `
                 -Lines 30
 
             Show-LogTail `
-                -Title "zstd proxy stdout" `
-                -Path $ProxyOut `
+                -Title "Responses 代理 stdout" `
+                -Path $ResponsesProxyOut `
                 -Lines 20
 
             Stop-BridgePort -Port 4101
 
             Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
-            Remove-Item $ProxyPidFile -Force -ErrorAction SilentlyContinue
+            Remove-Item $ResponsesProxyPidFile -Force -ErrorAction SilentlyContinue
 
-            Write-Error "zstd 代理启动后提前退出，exit=$($proxy.ExitCode)"
+            Write-Error "Responses 代理启动后提前退出，exit=$($proxy.ExitCode)"
         }
 
         Start-Sleep -Milliseconds 500
@@ -383,40 +398,107 @@ for ($i = 0; $i -lt 40; $i++) {
 if (-not $proxyReady) {
 
     Show-LogTail `
-        -Title "zstd proxy stderr" `
-        -Path $ProxyErr `
+        -Title "Responses 代理 stderr" `
+        -Path $ResponsesProxyErr `
         -Lines 30
 
     Show-LogTail `
-        -Title "zstd proxy stdout" `
-        -Path $ProxyOut `
+        -Title "Responses 代理 stdout" `
+        -Path $ResponsesProxyOut `
         -Lines 20
 
     Stop-BridgePort -Port 4100
     Stop-BridgePort -Port 4101
 
     Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
-    Remove-Item $ProxyPidFile -Force -ErrorAction SilentlyContinue
+    Remove-Item $ResponsesProxyPidFile -Force -ErrorAction SilentlyContinue
 
-    Write-Error "zstd 代理未在 20 秒内就绪"
+    Write-Error "Responses 代理未在 20 秒内就绪"
 }
 
 $proxyConn = Get-PortOwner -Port 4100
 
 if (-not $proxyConn) {
-    Write-Error "zstd proxy health check 成功，但 4100 没有监听进程"
+    Write-Error "Responses 代理 health check 成功，但 4100 没有监听进程"
 }
 
 $proxyPid = $proxyConn.OwningProcess
 
 # 保存真正监听 4100 的 PID。
-$proxyPid | Set-Content $ProxyPidFile
+$proxyPid | Set-Content $ResponsesProxyPidFile
 
-Write-Host "zstd 解压代理就绪（127.0.0.1:4100 -> 4101，pid=$proxyPid）"
+Write-Host "Responses 代理就绪（127.0.0.1:4100 -> 4101，pid=$proxyPid）"
 
 
 # ------------------------------------------------------------
-# 8. 验证 :4100 -> :4101
+# 8. 启动 Chat Completions 代理 :4102 -> :4101
+# ------------------------------------------------------------
+
+$chatProxy = Start-Process `
+    -FilePath $VenvPython `
+    -ArgumentList @(
+        $ChatProxyScript,
+        "4102",
+        "http://127.0.0.1:4101"
+    ) `
+    -RedirectStandardOutput $ChatProxyOut `
+    -RedirectStandardError $ChatProxyErr `
+    -WindowStyle Hidden `
+    -PassThru
+
+$chatProxy.Id | Set-Content $ChatProxyPidFile
+
+Write-Host "Chat Completions 代理启动命令已执行 pid=$($chatProxy.Id)"
+
+$chatProxyReady = $false
+
+for ($i = 0; $i -lt 40; $i++) {
+    try {
+        $null = Invoke-WebRequest `
+            -Uri "http://127.0.0.1:4102/health/liveliness" `
+            -TimeoutSec 2 `
+            -UseBasicParsing
+        $chatProxyReady = $true
+        break
+    }
+    catch {
+        if ($chatProxy.HasExited) {
+            Show-LogTail -Title "Chat Completions 代理 stderr" -Path $ChatProxyErr -Lines 30
+            Show-LogTail -Title "Chat Completions 代理 stdout" -Path $ChatProxyOut -Lines 20
+            Stop-BridgePort -Port 4100
+            Stop-BridgePort -Port 4101
+            Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
+            Remove-Item $ResponsesProxyPidFile -Force -ErrorAction SilentlyContinue
+            Remove-Item $ChatProxyPidFile -Force -ErrorAction SilentlyContinue
+            Write-Error "Chat Completions 代理启动后提前退出，exit=$($chatProxy.ExitCode)"
+        }
+        Start-Sleep -Milliseconds 500
+    }
+}
+
+if (-not $chatProxyReady) {
+    Show-LogTail -Title "Chat Completions 代理 stderr" -Path $ChatProxyErr -Lines 30
+    Show-LogTail -Title "Chat Completions 代理 stdout" -Path $ChatProxyOut -Lines 20
+    Stop-BridgePort -Port 4102
+    Stop-BridgePort -Port 4100
+    Stop-BridgePort -Port 4101
+    Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
+    Remove-Item $ResponsesProxyPidFile -Force -ErrorAction SilentlyContinue
+    Remove-Item $ChatProxyPidFile -Force -ErrorAction SilentlyContinue
+    Write-Error "Chat Completions 代理未在 20 秒内就绪"
+}
+
+$chatProxyConn = Get-PortOwner -Port 4102
+if (-not $chatProxyConn) {
+    Write-Error "Chat Completions 代理 health check 成功，但 4102 没有监听进程"
+}
+$chatProxyPid = $chatProxyConn.OwningProcess
+$chatProxyPid | Set-Content $ChatProxyPidFile
+Write-Host "Chat Completions 代理就绪（127.0.0.1:4102 -> 4101，pid=$chatProxyPid）"
+
+
+# ------------------------------------------------------------
+# 9. 验证协议入口 -> LiteLLM
 # ------------------------------------------------------------
 
 if (-not $NoVerify) {
@@ -426,7 +508,11 @@ if (-not $NoVerify) {
             -Uri "http://127.0.0.1:4100/v1/models" `
             -TimeoutSec 30
 
-        Write-Host "验证通过：代理 -> LiteLLM -> models=$($r.data.Count)"
+        $chatModels = Invoke-RestMethod `
+            -Uri "http://127.0.0.1:4102/v1/models" `
+            -TimeoutSec 30
+
+        Write-Host "验证通过：4100 Responses + 4102 Chat Completions -> LiteLLM -> models=$($r.data.Count)/$($chatModels.data.Count)"
     }
     catch {
 
@@ -438,15 +524,22 @@ if (-not $NoVerify) {
             -Lines 30
 
         Show-LogTail `
-            -Title "zstd proxy stderr" `
-            -Path $ProxyErr `
+            -Title "Responses 代理 stderr" `
+            -Path $ResponsesProxyErr `
             -Lines 30
 
+        Show-LogTail `
+            -Title "Chat Completions 代理 stderr" `
+            -Path $ChatProxyErr `
+            -Lines 30
+
+        Stop-BridgePort -Port 4102
         Stop-BridgePort -Port 4100
         Stop-BridgePort -Port 4101
 
         Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
-        Remove-Item $ProxyPidFile -Force -ErrorAction SilentlyContinue
+        Remove-Item $ResponsesProxyPidFile -Force -ErrorAction SilentlyContinue
+        Remove-Item $ChatProxyPidFile -Force -ErrorAction SilentlyContinue
 
         exit 1
     }
@@ -454,14 +547,14 @@ if (-not $NoVerify) {
 
 
 # ------------------------------------------------------------
-# 9. 最终状态
+# 10. 最终状态
 # ------------------------------------------------------------
 
 Write-Host ""
-Write-Host "Codex 网桥启动完成："
-Write-Host "  Codex      -> zstd proxy http://127.0.0.1:4100"
-Write-Host "  zstd proxy -> LiteLLM http://127.0.0.1:4101"
-Write-Host "  LiteLLM    -> ChatGPT GPT family / OpenCode Go"
+Write-Host "协议入口启动完成："
+Write-Host "  Responses       -> http://127.0.0.1:4100"
+Write-Host "  Chat Completions -> http://127.0.0.1:4102"
+Write-Host "  两个入口        -> LiteLLM http://127.0.0.1:4101"
 Write-Host "  Control-plane /v1/alpha/* -> $ControlPlaneBackend"
 Write-Host ""
 

@@ -1,12 +1,12 @@
-"""Codex → LiteLLM / ChatGPT control-plane 传输桥。
+"""Responses 协议与 control-plane 传输桥。
 
-背景：codex CLI/桌面端把 /v1/responses 请求体以 `Content-Encoding: zstd`
+背景：部分客户端把 /v1/responses 请求体以 `Content-Encoding: zstd`
 发送；LiteLLM(FastAPI) 不解压请求体，导致 model 字段解析失败（400
 model=None）。本代理在 127.0.0.1:4100 收请求，zstd 解压后转发到后端
 LiteLLM（默认 127.0.0.1:4101），并流式回传 SSE 响应。
 
-Codex 的网页搜索等 control-plane 请求使用 `/v1/alpha/*`，不属于
-LiteLLM 的模型 API；这些路径旁路到 ChatGPT control-plane upstream，
+网页搜索等 control-plane 请求使用 `/v1/alpha/*`，不属于 LiteLLM 的模型
+API；这些路径旁路到 control-plane upstream，
 并将上游路径映射为 `/alpha/*`。
 
 安全：仅绑定 loopback；不解析/不记录请求与响应内容；不含任何密钥。
@@ -25,7 +25,7 @@ import aiohttp
 import aiohttp.web
 import zstandard
 
-log = logging.getLogger("agent-zstd-proxy")
+log = logging.getLogger("responses-proxy")
 
 # 低于 opencode-go 模型 1,048,576 token 上下文上限，给输出保留余量。
 # 这里只做异常请求的最后保护；正常增长与压缩由 Codex 自身管理。
@@ -1544,7 +1544,7 @@ async def handle(
             return resp
     except Exception as exc:  # noqa: BLE001
         log.warning("backend request failed: %s", exc)
-        return aiohttp.web.Response(status=502, text="agent-zstd-proxy: backend unreachable")
+        return aiohttp.web.Response(status=502, text="responses-proxy: backend unreachable")
 
 
 async def main() -> None:
@@ -1572,7 +1572,7 @@ async def main() -> None:
     site = aiohttp.web.TCPSite(runner, "127.0.0.1", listen_port)
     await site.start()
     log.info(
-        "agent-zstd-proxy listening on 127.0.0.1:%s -> %s; control-plane -> %s",
+        "Responses proxy listening on 127.0.0.1:%s -> %s; control-plane -> %s",
         listen_port,
         backend,
         control_plane_backend,

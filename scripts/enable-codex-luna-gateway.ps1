@@ -155,7 +155,7 @@ function TaskEnd([string]$Name){Native @('/End','/TN',('\'+$Name)) 30 @(0,1,128)
 function TaskEnable([string]$Name,[bool]$Enable){if($Enable){Native @('/Change','/TN',('\'+$Name),'/ENABLE') 30}else{Native @('/Change','/TN',('\'+$Name),'/DISABLE') 30}}
 function PortPids([int]$Port){return @((Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue|ForEach-Object{[int]$_.OwningProcess}|Sort-Object -Unique))}
 function CmdLine([int]$ProcessId){$p=Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction SilentlyContinue|Select-Object -First 1;if($null -eq $p){return ''};return [string]$p.CommandLine}
-function GatewayOwner([int]$Port,[int]$ProcessId){$c=CmdLine $ProcessId;$root=[regex]::Escape($GatewayRoot);if([string]::IsNullOrWhiteSpace($c)-or$c-notmatch "(?i)$root"){return $false};if($Port-eq4100){return [bool]($c-match '(?i)agent-zstd-proxy\.py')};if($Port-eq4101){return [bool]($c-match '(?i)run_server\.py')};return $false}
+function GatewayOwner([int]$Port,[int]$ProcessId){$c=CmdLine $ProcessId;$root=[regex]::Escape($GatewayRoot);if([string]::IsNullOrWhiteSpace($c)-or$c-notmatch "(?i)$root"){return $false};if($Port-eq4100){return [bool]($c-match '(?i)(responses-proxy|agent-zstd-proxy)\.py')};if($Port-eq4101){return [bool]($c-match '(?i)run_server\.py')};if($Port-eq4102){return [bool]($c-match '(?i)chat-completions-proxy\.py')};return $false}
 function ControlOwner([int]$ProcessId){
     $p=Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction SilentlyContinue|Select-Object -First 1
     if($null -eq $p -or $p.Name -notmatch '(?i)^python(\.exe)?$' -or [string]$p.CommandLine -notmatch '(?i)\s-m\s+control_plane(\s|$)'){return $false}
@@ -195,7 +195,7 @@ function GatewayTreeRoot([int]$ProcessId){
     }
     return $ProcessId
 }
-function StopGatewayProcesses{AssertPortSafe 4100 'gateway';AssertPortSafe 4101 'gateway';$roots=@((PortPids 4100)+(PortPids 4101)|ForEach-Object{GatewayTreeRoot $_}|Sort-Object -Unique);foreach($id in $roots){StopTree $id};$end=[DateTime]::UtcNow.AddSeconds(30);while([DateTime]::UtcNow-lt$end){if((@(PortPids 4100).Count-eq0)-and(@(PortPids 4101).Count-eq0)){return};Start-Sleep -Milliseconds 300};Fail 'gateway ports did not clear'}
+function StopGatewayProcesses{AssertPortSafe 4100 'gateway';AssertPortSafe 4101 'gateway';AssertPortSafe 4102 'gateway';$roots=@((PortPids 4100)+(PortPids 4101)+(PortPids 4102)|ForEach-Object{GatewayTreeRoot $_}|Sort-Object -Unique);foreach($id in $roots){StopTree $id};$end=[DateTime]::UtcNow.AddSeconds(30);while([DateTime]::UtcNow-lt$end){if((@(PortPids 4100).Count-eq0)-and(@(PortPids 4101).Count-eq0)-and(@(PortPids 4102).Count-eq0)){return};Start-Sleep -Milliseconds 300};Fail 'gateway ports did not clear'}
 function StopControlProcess{AssertPortSafe 18083 'control';foreach($id in @(PortPids 18083)){StopTree $id};$end=[DateTime]::UtcNow.AddSeconds(30);while([DateTime]::UtcNow-lt$end){if(@(PortPids 18083).Count-eq0){return};Start-Sleep -Milliseconds 300};Fail 'control-plane port did not clear'}
 function Status([string]$Url){try{return [int](Invoke-WebRequest -Uri $Url -TimeoutSec 3 -SkipHttpErrorCheck).StatusCode}catch{return 0}}
 function ResolveCodexExe{
@@ -235,7 +235,8 @@ function OfficialModelSlugs{
 function GatewayHealthy {
     return (
         (Status 'http://127.0.0.1:4100/health/liveliness') -eq 200 -and
-        (Status 'http://127.0.0.1:4101/health/liveliness') -eq 200
+        (Status 'http://127.0.0.1:4101/health/liveliness') -eq 200 -and
+        (Status 'http://127.0.0.1:4102/health/liveliness') -eq 200
     )
 }
 function GatewayModelsMatch{
@@ -313,8 +314,8 @@ try{
         $alertSource.Contains('        decision = await policy.select(state)') -and
         $alertSource.Contains('        state = await controller.apply(decision)')
     )) { AssertCleanTarget $ControlRoot 'src/control_plane/alert_policy.py' }
-    AssertPortSafe 4100 'gateway';AssertPortSafe 4101 'gateway';AssertPortSafe 18083 'control';$gatewayWasReady=GatewayHealthy;$gatewayModelsMatched=if($gatewayWasReady){GatewayModelsMatch}else{$false};$controlWasLive=(Status 'http://127.0.0.1:18083/live')-eq200
-    Snapshot $CodexConfig 'codex.config.toml';Snapshot $ControlConfigPy 'control.config.py';Snapshot $ControlAlertPy 'control.alert_policy.py';Snapshot $ControlConfig 'control_plane.toml';Snapshot (Join-Path $GatewayRoot 'litellm\config.agent.yaml') 'gateway.config.agent.yaml';Snapshot (Join-Path $CodexHome 'models.filtered.json') 'codex.models.filtered.json';Snapshot (Join-Path $GatewayRoot 'litellm\.agent-gateway.pid') 'gateway.pid';Snapshot (Join-Path $GatewayRoot 'litellm\.agent-proxy.pid') 'gateway.proxy.pid'
+    AssertPortSafe 4100 'gateway';AssertPortSafe 4101 'gateway';AssertPortSafe 4102 'gateway';AssertPortSafe 18083 'control';$gatewayWasReady=GatewayHealthy;$gatewayModelsMatched=if($gatewayWasReady){GatewayModelsMatch}else{$false};$controlWasLive=(Status 'http://127.0.0.1:18083/live')-eq200
+    Snapshot $CodexConfig 'codex.config.toml';Snapshot $ControlConfigPy 'control.config.py';Snapshot $ControlAlertPy 'control.alert_policy.py';Snapshot $ControlConfig 'control_plane.toml';Snapshot (Join-Path $GatewayRoot 'litellm\config.agent.yaml') 'gateway.config.agent.yaml';Snapshot (Join-Path $CodexHome 'models.filtered.json') 'codex.models.filtered.json';Snapshot (Join-Path $GatewayRoot 'litellm\.agent-gateway.pid') 'gateway.pid';Snapshot (Join-Path $GatewayRoot 'litellm\.agent-proxy.pid') 'gateway.proxy.pid';Snapshot (Join-Path $GatewayRoot 'litellm\.chat-completions-proxy.pid') 'gateway.chat-proxy.pid'
     $stage='config';UpdatePersistentConfig
     $stage='gateway';if(-not $gatewayWasReady -or -not $gatewayModelsMatched){$gatewayTouched=$true;MarkChanged (Join-Path $GatewayRoot 'litellm\config.agent.yaml');TaskEnd $GatewayTask;StopGatewayProcesses;TaskEnable $GatewayTask $true;TaskRun $GatewayTask;WaitGateway 180}elseif(-not $gatewayTaskBefore.Enabled){$gatewayTouched=$true;TaskEnable $GatewayTask $true};GatewayProbe;Say 'LiteLLM 网关与模型路由验证通过'
     $stage='codex';CodexProbe;Say 'Codex 经 4100 网关验证通过'

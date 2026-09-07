@@ -17,7 +17,7 @@ $BackupPath = $null
 function Get-GatewayListeners {
     @(
         Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
-            Where-Object { $_.LocalPort -in 4100, 4101 }
+            Where-Object { $_.LocalPort -in 4100, 4101, 4102 }
     )
 }
 
