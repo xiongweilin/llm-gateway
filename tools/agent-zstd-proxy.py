@@ -892,7 +892,7 @@ async def handle(req: aiohttp.web.Request, backend: str, session: aiohttp.Client
             # A Codex CLI session can make multiple Responses turns. The
             # proxy must outlive the control-plane session budget so it does
             # not cancel a still-progressing upstream request first.
-            compress=False, timeout=aiohttp.ClientTimeout(total=1200),
+            compress=False, timeout=aiohttp.ClientTimeout(total=4200),
         ) as up:
             upstream_is_sse = "text/event-stream" in up.headers.get("Content-Type", "").lower()
             if req.method == "POST" and "/responses" in req.path and not caller_stream and upstream_is_sse:

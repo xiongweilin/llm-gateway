@@ -12,6 +12,8 @@
 - Codex 路径：Codex -> 4100 -> 4101 -> ChatGPT GPT family 或 OpenCode Go。
 - 当前模型集合：gpt-5.6-sol、gpt-5.6-terra、gpt-5.6-luna、
   opencode-go/muse-spark-1.3-contributor。
+- OpenCode Go 路由的 LiteLLM `timeout` 与 `stream_timeout` 为 3600 秒；4100 代理的
+  上游总超时为 4200 秒，用于覆盖长时间推理中的流式空闲间隔。
 - 默认模型：gpt-5.6-luna。
 - 运行时不使用数据库；配置事实源是 config.agent.yaml，测试配置是 config.yaml。
 

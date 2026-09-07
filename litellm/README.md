@@ -122,6 +122,8 @@ litellm/
   provider 限定的兼容转换：把 Codex 私有 `additional_tools` 提升为顶层
   `tools`、补齐空的 function/namespace 描述、修正工具 schema、移除不支持的
   custom tool 和参数兼容转换，不改变 GPT 路由语义。
+- OpenCode Go 路由的 LiteLLM `timeout`/`stream_timeout` 均为 3600 秒，代理总请求
+  超时为 4200 秒，避免长时间推理期间上游暂时无 SSE 数据时提前关闭连接。
 - 超长会话截断：超过 950k token 预算时代理截断最旧条目，并按 `call_id` 对账
   工具调用/输出配对，删除被截断调用遗留的孤儿 `function_call_output`，避免
   OpenCode Go 以 "No tool call found for tool output" 整体拒绝请求。
