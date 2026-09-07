@@ -11,8 +11,9 @@
 - 4101：LiteLLM，监听 127.0.0.1:4101，提供 OpenAI 兼容网关。
 - Codex 路径：Codex -> 4100 -> 4101 -> ChatGPT GPT family 或 OpenCode Go。
 - GPT 与 OpenCode Go 模型的 Codex 请求都从 `/v1/responses` 进入 4100 -> 4101；
-  Muse 上游使用 Responses，Omen Alpha 由 LiteLLM 的 `mode: chat` 桥接到
-  OpenCode Go 的 `/chat/completions`；Codex 宿主执行
+  Muse 上游使用 Responses，Omen Alpha 通过 LiteLLM 的
+  `openai/chat_completions/omen-alpha` 模型前缀桥接到 OpenCode Go 的
+  `/chat/completions`；单独设置 `model_info.mode: chat` 不会触发该桥接；Codex 宿主执行
   `web__run` 时产生的 `/v1/alpha/*` control-plane 请求由 4100 旁路到
   `https://chatgpt.com/backend-api/codex`（上游路径为 `/alpha/*`），不送入
   LiteLLM。

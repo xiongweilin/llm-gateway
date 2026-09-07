@@ -110,7 +110,7 @@ litellm/
   同步进入 Codex 两个目录，并确保 `config.toml` 的 `model_catalog_json` 引用
   `models.json`。GPT 模型通过 `chatgpt/<official-model>` provider route 转发，
   OpenCode Go 模型通过 `openai/muse-spark-1.3-contributor`（Responses）与
-  `openai/omen-alpha`（Chat Completions）经由
+  `openai/chat_completions/omen-alpha`（LiteLLM Responses -> Chat Completions bridge）经由
   `https://opencode.ai/zen/go/v1` 转发；脚本每次运行都会保留这五个受控条目，
   不会因 Codex 缓存刷新而产生目录分叉。
   网关重启后即可加载新的 LiteLLM 列表，Codex Desktop/CLI 重新启动后即可重新读取模型目录。

@@ -46,7 +46,9 @@ model_list:
     model_info:
       mode: chat
     litellm_params:
-      model: 'openai/omen-alpha'
+      # The prefix makes LiteLLM's /v1/responses route use its
+      # Responses -> Chat Completions bridge for this chat-only model.
+      model: 'openai/chat_completions/omen-alpha'
       api_base: https://opencode.ai/zen/go/v1
       api_key: os.environ/OPENCODEGO_API_KEY
       timeout: 3600
