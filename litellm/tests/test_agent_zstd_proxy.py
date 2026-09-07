@@ -516,22 +516,151 @@ def test_tool_schema_required_normalization_is_scoped_to_opencode() -> None:
     assert proxy.normalize_tool_schemas(raw) is raw
 
 
-def test_custom_tool_declarations_are_removed_only_for_opencode() -> None:
+def test_custom_tool_declarations_are_bridged_for_opencode() -> None:
     request = {
         "model": "opencode-go/muse-spark-1.2-contributor",
         "tools": [
-            {"type": "custom", "name": "shell"},
+            {"type": "custom", "name": "exec", "description": "Run JavaScript."},
             {"type": "function", "name": "read_file", "parameters": {"properties": {}}},
         ],
-        "input": [{"type": "custom_tool_call", "name": "shell"}],
+        "input": [
+            {
+                "type": "custom_tool_call",
+                "name": "exec",
+                "call_id": "call_exec",
+                "input": "await tools.exec_command({cmd: 'Get-Location'})",
+            },
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_exec",
+                "output": "ok",
+            },
+        ],
     }
-    normalized = json.loads(proxy.drop_opencode_custom_tools(json.dumps(request).encode()))
-    assert [tool["type"] for tool in normalized["tools"]] == ["function"]
-    assert normalized["input"][0]["type"] == "custom_tool_call"
+    normalized = json.loads(proxy.normalize_opencode_custom_tools(json.dumps(request).encode()))
+    assert [tool["type"] for tool in normalized["tools"]] == ["function", "function"]
+    assert normalized["tools"][0]["parameters"]["required"] == ["input"]
+    assert normalized["input"][0]["type"] == "function_call"
+    assert json.loads(normalized["input"][0]["arguments"]) == {
+        "input": "await tools.exec_command({cmd: 'Get-Location'})"
+    }
+    assert normalized["input"][1]["type"] == "function_call_output"
 
     request["model"] = "gpt-5.6-luna"
     raw = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode()
-    assert proxy.drop_opencode_custom_tools(raw) is raw
+    assert proxy.normalize_opencode_custom_tools(raw) is raw
+
+
+def test_namespaced_calls_are_repaired_for_opencode() -> None:
+    request = {
+        "model": "opencode-go/muse-spark-1.2-contributor",
+        "tools": [
+            {
+                "type": "namespace",
+                "name": "mcp__cua_repl",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "js",
+                        "description": "Run JavaScript.",
+                        "parameters": {"type": "object", "properties": {}},
+                    }
+                ],
+            }
+        ],
+        "input": [
+            {
+                "type": "function_call",
+                "name": "mcp__cua_repl.js",
+                "arguments": "{}",
+                "call_id": "call_js",
+            }
+        ],
+    }
+    normalized = json.loads(
+        proxy.normalize_opencode_namespaced_calls(json.dumps(request).encode())
+    )
+    assert normalized["input"][0]["namespace"] == "mcp__cua_repl"
+    assert normalized["input"][0]["name"] == "js"
+
+    event = {
+        "type": "response.output_item.done",
+        "item": {
+            "type": "function_call",
+            "name": "mcp__cua_repl.js",
+            "arguments": "{}",
+            "call_id": "call_js_2",
+        },
+    }
+    wire = b"data: " + json.dumps(event).encode() + b"\n\n"
+    rewritten, pending, count = proxy.rewrite_sse_collaboration_calls(
+        wire,
+        namespaced_tools=proxy.collect_opencode_namespaced_tools(
+            json.dumps(request).encode()
+        ),
+    )
+    assert pending == b""
+    assert count == 1
+    payload = next(line[6:] for line in rewritten.splitlines() if line.startswith(b"data: "))
+    item = json.loads(payload)["item"]
+    assert item["namespace"] == "mcp__cua_repl"
+    assert item["name"] == "js"
+
+
+def test_custom_function_stream_is_restored_to_codex_custom_call() -> None:
+    events = [
+        {
+            "type": "response.output_item.added",
+            "item": {
+                "type": "function_call",
+                "id": "fc_exec",
+                "name": "exec",
+                "arguments": "",
+            },
+        },
+        {
+            "type": "response.function_call_arguments.delta",
+            "item_id": "fc_exec",
+            "delta": "const result = 1;",
+        },
+        {
+            "type": "response.function_call_arguments.done",
+            "item_id": "fc_exec",
+            "arguments": '{"input":"const result = 1;"}',
+        },
+        {
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "id": "fc_exec",
+                "name": "exec",
+                "arguments": '{"input":"const result = 1;"}',
+            },
+        },
+    ]
+    wire = b"".join(
+        b"data: " + json.dumps(event).encode() + b"\n\n"
+        for event in events
+    )
+
+    rewritten, pending, count = proxy.rewrite_sse_collaboration_calls(
+        wire,
+        custom_tool_names={"exec"},
+        custom_call_item_ids={},
+    )
+    assert pending == b""
+    assert count == 4
+    payloads = [
+        json.loads(line[6:])
+        for line in rewritten.splitlines()
+        if line.startswith(b"data: ")
+    ]
+    assert payloads[0]["item"]["type"] == "custom_tool_call"
+    assert payloads[1]["type"] == "response.custom_tool_call_input.delta"
+    assert payloads[2]["type"] == "response.custom_tool_call_input.done"
+    assert payloads[2]["input"] == "const result = 1;"
+    assert payloads[3]["item"]["type"] == "custom_tool_call"
+    assert payloads[3]["item"]["input"] == "const result = 1;"
 
 
 def test_truncate_input_never_leaves_orphaned_tool_outputs() -> None:

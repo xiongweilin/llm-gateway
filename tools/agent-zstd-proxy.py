@@ -283,6 +283,177 @@ def normalize_opencode_additional_tools(body: bytes) -> bytes:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
 
 
+def _custom_tool_parameters() -> dict:
+    """Expose a Responses custom tool to OpenCode as one string property."""
+    return {
+        "type": "object",
+        "properties": {
+            "input": {
+                "type": "string",
+                "description": "Raw input for this tool.",
+            }
+        },
+        "required": ["input"],
+        "additionalProperties": False,
+    }
+
+
+def _collect_opencode_custom_tool_names(value) -> set[str]:
+    names = set()
+
+    def visit(node) -> None:
+        if isinstance(node, list):
+            for child in node:
+                visit(child)
+            return
+        if not isinstance(node, dict):
+            return
+        if node.get("type") in {"custom", "custom_tool_call"}:
+            name = node.get("name")
+            if isinstance(name, str) and name:
+                names.add(name)
+        for child in node.values():
+            visit(child)
+
+    visit(value)
+    return names
+
+
+def collect_opencode_custom_tool_names(body: bytes) -> set[str]:
+    """Return custom tool names without retaining any tool arguments."""
+    try:
+        obj = json.loads(body)
+    except Exception:
+        return set()
+    model = obj.get("model")
+    if not isinstance(model, str) or not model.startswith("opencode-go/"):
+        return set()
+    return _collect_opencode_custom_tool_names(obj)
+
+
+def _custom_arguments(input_value) -> str:
+    if isinstance(input_value, str):
+        raw_input = input_value
+    elif input_value is None:
+        raw_input = ""
+    else:
+        raw_input = json.dumps(input_value, ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(
+        {"input": raw_input},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _custom_input_from_arguments(arguments) -> str:
+    if isinstance(arguments, str):
+        try:
+            parsed = json.loads(arguments)
+        except Exception:
+            return arguments
+    else:
+        parsed = arguments
+    if isinstance(parsed, dict) and "input" in parsed:
+        parsed = parsed["input"]
+    if isinstance(parsed, str):
+        return parsed
+    if parsed is None:
+        return ""
+    return json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
+
+
+def _convert_custom_history_items(value, custom_names: set[str]):
+    if isinstance(value, list):
+        return [_convert_custom_history_items(child, custom_names) for child in value]
+    if not isinstance(value, dict):
+        return value
+
+    item_type = value.get("type")
+    name = value.get("name")
+    if item_type == "custom_tool_call" and name in custom_names:
+        converted = {
+            key: child
+            for key, child in value.items()
+            if key not in {"type", "input", "custom_tool_call_id"}
+        }
+        if "call_id" not in converted and isinstance(value.get("custom_tool_call_id"), str):
+            converted["call_id"] = value["custom_tool_call_id"]
+        converted["type"] = "function_call"
+        converted["arguments"] = _custom_arguments(value.get("input"))
+        return converted
+    if item_type == "custom_tool_call_output":
+        converted = {
+            key: child
+            for key, child in value.items()
+            if key not in {"type", "custom_tool_call_id"}
+        }
+        if "call_id" not in converted and isinstance(value.get("custom_tool_call_id"), str):
+            converted["call_id"] = value["custom_tool_call_id"]
+        converted["type"] = "function_call_output"
+        return converted
+    return {
+        key: _convert_custom_history_items(child, custom_names)
+        for key, child in value.items()
+    }
+
+
+def _convert_custom_declarations(value, custom_names: set[str]):
+    if isinstance(value, list):
+        return [_convert_custom_declarations(child, custom_names) for child in value]
+    if not isinstance(value, dict):
+        return value
+    if value.get("type") == "custom" and value.get("name") in custom_names:
+        name = value["name"]
+        description = value.get("description")
+        if not isinstance(description, str) or not description.strip():
+            description = f"{name} tool"
+        return {
+            "type": "function",
+            "name": name,
+            "description": description,
+            "parameters": _custom_tool_parameters(),
+        }
+    return {
+        key: _convert_custom_declarations(child, custom_names)
+        for key, child in value.items()
+    }
+
+
+def normalize_opencode_custom_tools(body: bytes) -> bytes:
+    """Bridge Codex custom tools through OpenCode's function-tool surface.
+
+    OpenCode Go rejects Responses ``custom`` declarations, while Codex's
+    ``exec`` tool is intentionally a custom tool whose input is raw text.
+    Send a strict one-property function declaration upstream and convert
+    historical custom call items to the corresponding function items. The
+    response bridge converts the provider's function call back to a custom
+    call before Codex sees it.
+    """
+    try:
+        obj = json.loads(body)
+    except Exception:
+        return body
+
+    model = obj.get("model")
+    if not isinstance(model, str) or not model.startswith("opencode-go/"):
+        return body
+    custom_names = _collect_opencode_custom_tool_names(obj)
+    if not custom_names:
+        return body
+
+    normalized = _convert_custom_declarations(obj, custom_names)
+    if isinstance(normalized.get("input"), list):
+        normalized["input"] = _convert_custom_history_items(
+            normalized["input"],
+            custom_names,
+        )
+    log.info(
+        "OpenCode Go custom tool compatibility: bridged=%d",
+        len(custom_names),
+    )
+    return json.dumps(normalized, ensure_ascii=False, separators=(",", ":")).encode()
+
+
 def normalize_opencode_tool_descriptions(body: bytes) -> bytes:
     """Ensure OpenCode Go tool declarations have non-empty descriptions."""
     try:
@@ -411,50 +582,144 @@ def normalize_tool_schemas(body: bytes) -> bytes:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
 
 
-def drop_opencode_custom_tools(body: bytes) -> bytes:
-    """Remove Responses ``custom`` tool declarations unsupported by OpenCode Go.
+def _collect_namespaced_function_tools(value) -> dict[str, tuple[str, str]]:
+    mapping = {}
 
-    This intentionally leaves ``custom_tool_call`` history items untouched;
-    only declarations inside ``tools`` arrays are removed. ChatGPT requests
-    and all other tool types pass through unchanged.
-    """
+    def visit(node, namespace: str | None = None) -> None:
+        if isinstance(node, list):
+            for child in node:
+                visit(child, namespace)
+            return
+        if not isinstance(node, dict):
+            return
+        current_namespace = namespace
+        if node.get("type") == "namespace" and isinstance(node.get("name"), str):
+            current_namespace = node["name"]
+        elif node.get("type") == "function":
+            name = node.get("name")
+            if current_namespace and isinstance(name, str) and name:
+                mapping.setdefault(
+                    f"{current_namespace}.{name}",
+                    (current_namespace, name),
+                )
+        for child in node.values():
+            visit(child, current_namespace)
+
+    visit(value)
+    return mapping
+
+
+def collect_opencode_namespaced_tools(body: bytes) -> dict[str, tuple[str, str]]:
+    """Return flattened-name to namespace/name mappings for an OpenCode request."""
+    try:
+        obj = json.loads(body)
+    except Exception:
+        return {}
+    model = obj.get("model")
+    if not isinstance(model, str) or not model.startswith("opencode-go/"):
+        return {}
+    return _collect_namespaced_function_tools(obj.get("tools", []))
+
+
+def _repair_namespaced_function_calls(value, namespaced_tools: dict[str, tuple[str, str]]) -> int:
+    changed = 0
+    if isinstance(value, list):
+        for child in value:
+            changed += _repair_namespaced_function_calls(child, namespaced_tools)
+        return changed
+    if not isinstance(value, dict):
+        return 0
+    if value.get("type") == "function_call" and not value.get("namespace"):
+        name = value.get("name")
+        mapped = namespaced_tools.get(name) if isinstance(name, str) else None
+        if mapped is not None:
+            value["namespace"], value["name"] = mapped
+            changed += 1
+    for child in value.values():
+        changed += _repair_namespaced_function_calls(child, namespaced_tools)
+    return changed
+
+
+def normalize_opencode_namespaced_calls(body: bytes) -> bytes:
+    """Restore namespace fields that OpenCode Go flattens in call history."""
     try:
         obj = json.loads(body)
     except Exception:
         return body
-
     model = obj.get("model")
     if not isinstance(model, str) or not model.startswith("opencode-go/"):
         return body
-
-    dropped = 0
-
-    def visit(value) -> None:
-        nonlocal dropped
-        if isinstance(value, list):
-            for item in value:
-                visit(item)
-            return
-        if not isinstance(value, dict):
-            return
-        for key, child in list(value.items()):
-            if key == "tools" and isinstance(child, list):
-                kept = []
-                for item in child:
-                    if isinstance(item, dict) and item.get("type") == "custom":
-                        dropped += 1
-                        continue
-                    kept.append(item)
-                    visit(item)
-                value[key] = kept
-            else:
-                visit(child)
-
-    visit(obj)
-    if not dropped:
+    namespaced_tools = _collect_namespaced_function_tools(obj.get("tools", []))
+    if not namespaced_tools:
         return body
-    log.info("OpenCode Go custom tool compatibility: dropped=%d", dropped)
+    changed = _repair_namespaced_function_calls(obj.get("input", []), namespaced_tools)
+    if not changed:
+        return body
+    log.info("OpenCode Go namespace compatibility: repaired=%d", changed)
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
+
+
+def _rewrite_opencode_response_tools(
+    value,
+    namespaced_tools: dict[str, tuple[str, str]] | None = None,
+    custom_tool_names: set[str] | None = None,
+    custom_call_item_ids: dict[str, str] | None = None,
+) -> int:
+    """Restore Codex tool item/call shapes after OpenCode function conversion."""
+    namespaced_tools = namespaced_tools or {}
+    custom_tool_names = custom_tool_names or set()
+    custom_call_item_ids = custom_call_item_ids if custom_call_item_ids is not None else {}
+    changed = 0
+
+    if isinstance(value, list):
+        for child in value:
+            changed += _rewrite_opencode_response_tools(
+                child,
+                namespaced_tools,
+                custom_tool_names,
+                custom_call_item_ids,
+            )
+        return changed
+    if not isinstance(value, dict):
+        return 0
+
+    event_type = value.get("type")
+    item_id = value.get("item_id")
+    if event_type in {
+        "response.function_call_arguments.delta",
+        "response.function_call_arguments.done",
+    } and item_id in custom_call_item_ids:
+        if event_type.endswith(".delta"):
+            value["type"] = "response.custom_tool_call_input.delta"
+        else:
+            value["type"] = "response.custom_tool_call_input.done"
+            value["input"] = _custom_input_from_arguments(value.pop("arguments", ""))
+        changed += 1
+
+    if value.get("type") == "function_call":
+        name = value.get("name")
+        if name in custom_tool_names:
+            item_id = value.get("id")
+            if isinstance(item_id, str) and item_id:
+                custom_call_item_ids[item_id] = name
+            value["type"] = "custom_tool_call"
+            value["input"] = _custom_input_from_arguments(value.pop("arguments", ""))
+            value.pop("namespace", None)
+            changed += 1
+        elif not value.get("namespace") and isinstance(name, str):
+            mapped = namespaced_tools.get(name)
+            if mapped is not None:
+                value["namespace"], value["name"] = mapped
+                changed += 1
+
+    for child in value.values():
+        changed += _rewrite_opencode_response_tools(
+            child,
+            namespaced_tools,
+            custom_tool_names,
+            custom_call_item_ids,
+        )
+    return changed
 
 
 def adapt_collaboration_request(body: bytes) -> bytes:
@@ -653,6 +918,9 @@ def rewrite_sse_collaboration_calls(
     data: bytes,
     final: bool = False,
     normalize_function_args: bool = False,
+    namespaced_tools: dict[str, tuple[str, str]] | None = None,
+    custom_tool_names: set[str] | None = None,
+    custom_call_item_ids: dict[str, str] | None = None,
 ) -> tuple[bytes, bytes, int]:
     """Rewrite complete SSE data lines and retain any split trailing line."""
     parts = data.split(b"\n")
@@ -671,6 +939,12 @@ def rewrite_sse_collaboration_calls(
                 event = None
             if event is not None:
                 event_changed = _force_plaintext_collaboration_calls(event)
+                event_changed += _rewrite_opencode_response_tools(
+                    event,
+                    namespaced_tools=namespaced_tools,
+                    custom_tool_names=custom_tool_names,
+                    custom_call_item_ids=custom_call_item_ids,
+                )
                 if normalize_function_args:
                     event_changed += _normalize_function_call_arguments(event)
                 if event_changed:
@@ -687,6 +961,8 @@ def rewrite_sse_collaboration_calls(
 def aggregate_responses_sse(
     data: bytes,
     normalize_function_args: bool = False,
+    namespaced_tools: dict[str, tuple[str, str]] | None = None,
+    custom_tool_names: set[str] | None = None,
 ) -> tuple[bytes | None, int]:
     """Build one Responses JSON object for callers that requested non-streaming."""
     completed = None
@@ -712,6 +988,11 @@ def aggregate_responses_sse(
     if not completed.get("output") and output_items:
         completed["output"] = [item for _, item in sorted(output_items.items())]
     rewritten_calls = _force_plaintext_collaboration_calls(completed)
+    rewritten_calls += _rewrite_opencode_response_tools(
+        completed,
+        namespaced_tools=namespaced_tools,
+        custom_tool_names=custom_tool_names,
+    )
     if normalize_function_args:
         rewritten_calls += _normalize_function_call_arguments(completed)
     return (
@@ -847,6 +1128,9 @@ async def handle(req: aiohttp.web.Request, backend: str, session: aiohttp.Client
     dec = decompress(body, enc)
     caller_stream = True
     normalize_function_args = False
+    namespaced_tools: dict[str, tuple[str, str]] = {}
+    custom_tool_names: set[str] = set()
+    custom_call_item_ids: dict[str, str] = {}
     if req.method == "POST" and "/responses" in req.path:
         try:
             request_obj = json.loads(dec)
@@ -862,8 +1146,11 @@ async def handle(req: aiohttp.web.Request, backend: str, session: aiohttp.Client
         dec = normalize_scalar_responses_input(dec)
         dec = adapt_collaboration_request(dec)
         dec = normalize_opencode_additional_tools(dec)
+        custom_tool_names = collect_opencode_custom_tool_names(dec)
+        dec = normalize_opencode_custom_tools(dec)
         dec = normalize_agent_messages(dec)
-        dec = drop_opencode_custom_tools(dec)
+        namespaced_tools = collect_opencode_namespaced_tools(dec)
+        dec = normalize_opencode_namespaced_calls(dec)
         dec = normalize_opencode_tool_descriptions(dec)
         dec = normalize_tool_schemas(dec)
         normalized = request_summary(dec)
@@ -900,6 +1187,8 @@ async def handle(req: aiohttp.web.Request, backend: str, session: aiohttp.Client
                 aggregated, rewritten_calls = aggregate_responses_sse(
                     upstream_body,
                     normalize_function_args=normalize_function_args,
+                    namespaced_tools=namespaced_tools,
+                    custom_tool_names=custom_tool_names,
                 )
                 if aggregated is not None:
                     headers = {
@@ -944,6 +1233,9 @@ async def handle(req: aiohttp.web.Request, backend: str, session: aiohttp.Client
                         out, pending, changed = rewrite_sse_collaboration_calls(
                             pending + chunk,
                             normalize_function_args=normalize_function_args,
+                            namespaced_tools=namespaced_tools,
+                            custom_tool_names=custom_tool_names,
+                            custom_call_item_ids=custom_call_item_ids,
                         )
                         rewritten_calls += changed
                         if out:
@@ -955,6 +1247,9 @@ async def handle(req: aiohttp.web.Request, backend: str, session: aiohttp.Client
                     pending,
                     final=True,
                     normalize_function_args=normalize_function_args,
+                    namespaced_tools=namespaced_tools,
+                    custom_tool_names=custom_tool_names,
+                    custom_call_item_ids=custom_call_item_ids,
                 )
                 rewritten_calls += changed
                 if out:

@@ -52,12 +52,26 @@ def normalize_opencode_tool_schemas(data: dict[str, Any]) -> int:
     return fixed
 
 
-def drop_opencode_custom_tools(data: dict[str, Any]) -> int:
-    """Remove unsupported ``custom`` tool declarations from outbound data."""
-    dropped = 0
+def _custom_tool_parameters() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "input": {
+                "type": "string",
+                "description": "Raw input for this tool.",
+            }
+        },
+        "required": ["input"],
+        "additionalProperties": False,
+    }
+
+
+def normalize_opencode_custom_tools(data: dict[str, Any]) -> int:
+    """Bridge custom declarations to function declarations for OpenCode Go."""
+    converted = 0
 
     def visit(value: Any) -> None:
-        nonlocal dropped
+        nonlocal converted
         if isinstance(value, list):
             for child in value:
                 visit(child)
@@ -69,7 +83,20 @@ def drop_opencode_custom_tools(data: dict[str, Any]) -> int:
                 kept = []
                 for item in child:
                     if isinstance(item, dict) and item.get("type") == "custom":
-                        dropped += 1
+                        name = item.get("name")
+                        if not isinstance(name, str) or not name:
+                            kept.append(item)
+                            continue
+                        description = item.get("description")
+                        if not isinstance(description, str) or not description.strip():
+                            description = f"{name} tool"
+                        kept.append({
+                            "type": "function",
+                            "name": name,
+                            "description": description,
+                            "parameters": _custom_tool_parameters(),
+                        })
+                        converted += 1
                         continue
                     kept.append(item)
                     visit(item)
@@ -78,7 +105,7 @@ def drop_opencode_custom_tools(data: dict[str, Any]) -> int:
                 visit(child)
 
     visit(data)
-    return dropped
+    return converted
 
 
 _original_transform_responses_api_request = OpenAIResponsesAPIConfig.transform_responses_api_request
@@ -94,12 +121,12 @@ def _transform_responses_api_request_with_opencode_compat(
     litellm_params = kwargs.get("litellm_params")
     api_base = getattr(litellm_params, "api_base", None)
     if isinstance(model, str) and isinstance(api_base, str) and "opencode.ai/zen/go" in api_base:
-        dropped = drop_opencode_custom_tools(data)
+        converted = normalize_opencode_custom_tools(data)
         fixed = normalize_opencode_tool_schemas(data)
-        if dropped or fixed:
+        if converted or fixed:
             litellm.verbose_logger.info(
-                "OpenCode Go outbound tool compatibility: dropped_custom=%d fixed_required=%d",
-                dropped,
+                "OpenCode Go outbound tool compatibility: bridged_custom=%d fixed_required=%d",
+                converted,
                 fixed,
             )
     return data

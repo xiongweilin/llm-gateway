@@ -14,6 +14,8 @@
   opencode-go/muse-spark-1.3-contributor。
 - OpenCode Go 路由的 LiteLLM `timeout` 与 `stream_timeout` 为 3600 秒；4100 代理的
   上游总超时为 4200 秒，用于覆盖长时间推理中的流式空闲间隔。
+- Codex 工具兼容：`custom_tool_call` 在发往 OpenCode Go 时临时转为单字符串
+  function，响应返回 Codex 前再还原；namespace 函数调用会恢复为声明的 namespace/name。
 - 默认模型：gpt-5.6-luna。
 - 运行时不使用数据库；配置事实源是 config.agent.yaml，测试配置是 config.yaml。
 

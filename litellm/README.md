@@ -120,8 +120,9 @@ litellm/
   的消息参数，再把 `agent_message` 转成 OpenCode Go 能读取的标准 user message。
 - OpenCode Go supplemental route 已启用；代理仅对 `opencode-go/*` 请求执行
   provider 限定的兼容转换：把 Codex 私有 `additional_tools` 提升为顶层
-  `tools`、补齐空的 function/namespace 描述、修正工具 schema、移除不支持的
-  custom tool 和参数兼容转换，不改变 GPT 路由语义。
+  `tools`、把 Codex `custom_tool_call` 临时桥接为单字符串 function、恢复响应
+  中的 custom call、修复 namespace 函数的扁平化名称、补齐空的 function/namespace
+  描述、修正工具 schema，不改变 GPT 路由语义。
 - OpenCode Go 路由的 LiteLLM `timeout`/`stream_timeout` 均为 3600 秒，代理总请求
   超时为 4200 秒，避免长时间推理期间上游暂时无 SSE 数据时提前关闭连接。
 - 超长会话截断：超过 950k token 预算时代理截断最旧条目，并按 `call_id` 对账
