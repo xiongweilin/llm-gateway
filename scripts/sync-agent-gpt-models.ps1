@@ -1,8 +1,9 @@
 # 从 Codex 官方模型缓存生成 LiteLLM model_list，并统一维护 Codex 模型目录。
 #
 # 默认行为：
-# - 运行时缓存、Codex 显示目录和 LiteLLM model_list 使用同一份三模型白名单；
-# - 清理其他模型，保持三个模型的固定顺序并去重；
+# - 运行时缓存、Codex 显示目录和 LiteLLM model_list 保留三个官方 GPT 模型，
+#   并追加一个受控的 OpenCode Go supplemental model；
+# - 清理其他模型，保持固定顺序并去重；
 # - 只在生成并校验完整内容后替换目标文件，失败不会破坏现有配置；
 # - 运行时由 start-agent-gateway.ps1 在停止旧网关前调用。
 
@@ -26,6 +27,8 @@ $AllowedModelSlugs = @(
     "gpt-5.6-terra",
     "gpt-5.6-luna"
 )
+$SupplementalModelSlug = "opencode-go/muse-spark-1.3-contributor"
+$ManagedModelSlugs = @($AllowedModelSlugs + $SupplementalModelSlug)
 
 function Add-UniqueModel {
     param(
@@ -52,15 +55,54 @@ function Read-ModelCatalog {
     }
 }
 
-function Sync-CodexRuntimeCatalog {
+function Set-ModelProperty {
+    param(
+        [Parameter(Mandatory)]
+        [object]$Object,
+        [Parameter(Mandatory)]
+        [string]$Name,
+        [Parameter(Mandatory)]
+        [object]$Value
+    )
+
+    if ($null -ne $Object.PSObject.Properties[$Name]) {
+        $Object.$Name = $Value
+    }
+    else {
+        $Object | Add-Member -NotePropertyName $Name -NotePropertyValue $Value
+    }
+}
+
+function New-SupplementalCodexModel {
+    param(
+        [Parameter(Mandatory)]
+        [object]$TemplateModel
+    )
+
+    $model = $TemplateModel | ConvertTo-Json -Depth 100 | ConvertFrom-Json
+    Set-ModelProperty -Object $model -Name "slug" -Value $SupplementalModelSlug
+    Set-ModelProperty -Object $model -Name "display_name" -Value "Muse Spark 1.3 Contributor (OpenCode Go)"
+    Set-ModelProperty -Object $model -Name "description" -Value "OpenCode Go contributor model routed through the local LiteLLM gateway."
+    Set-ModelProperty -Object $model -Name "visibility" -Value "list"
+    Set-ModelProperty -Object $model -Name "supported_in_api" -Value $true
+    Set-ModelProperty -Object $model -Name "priority" -Value 4
+    Set-ModelProperty -Object $model -Name "context_window" -Value 1048576
+    Set-ModelProperty -Object $model -Name "max_context_window" -Value 1048576
+    return $model
+}
+
+function Get-ManagedCatalogModels {
     param(
         [Parameter(Mandatory)]
         [object]$Catalog
     )
 
+    if ($null -eq $Catalog.models) {
+        throw "Codex 模型目录没有 models 数组"
+    }
+
     $existingModels = @($Catalog.models)
     $updatedModels = [System.Collections.Generic.List[object]]::new()
-    $changed = $false
 
     foreach ($slug in $AllowedModelSlugs) {
         $existing = @(
@@ -68,34 +110,56 @@ function Sync-CodexRuntimeCatalog {
         ) | Select-Object -First 1
 
         if ($null -eq $existing) {
-            throw "Codex 运行时目录缺少统一模型: $slug"
+            throw "Codex 目录缺少统一模型: $slug"
         }
 
+        Set-ModelProperty -Object $existing -Name "visibility" -Value "list"
         [void]$updatedModels.Add($existing)
-        if ([string]$existing.visibility -ne "list") {
-            $existing.visibility = "list"
-            $changed = $true
-        }
     }
 
-    if ($existingModels.Count -ne $updatedModels.Count) {
-        $changed = $true
+    $supplemental = @(
+        $existingModels | Where-Object { [string]$_.slug -eq $SupplementalModelSlug }
+    ) | Select-Object -First 1
+
+    if ($null -eq $supplemental) {
+        $template = @(
+            $existingModels | Where-Object { [string]$_.slug -eq "gpt-5.6-luna" }
+        ) | Select-Object -First 1
+        if ($null -eq $template) {
+            throw "无法为 OpenCode Go 模型找到 Codex 元数据模板"
+        }
+        $supplemental = New-SupplementalCodexModel -TemplateModel $template
     }
     else {
-        for ($index = 0; $index -lt $updatedModels.Count; $index++) {
-            if ([string]$existingModels[$index].slug -ne [string]$updatedModels[$index].slug) {
-                $changed = $true
-                break
-            }
-        }
+        Set-ModelProperty -Object $supplemental -Name "display_name" -Value "Muse Spark 1.3 Contributor (OpenCode Go)"
+        Set-ModelProperty -Object $supplemental -Name "description" -Value "OpenCode Go contributor model routed through the local LiteLLM gateway."
+        Set-ModelProperty -Object $supplemental -Name "visibility" -Value "list"
+        Set-ModelProperty -Object $supplemental -Name "supported_in_api" -Value $true
+        Set-ModelProperty -Object $supplemental -Name "priority" -Value 4
+        Set-ModelProperty -Object $supplemental -Name "context_window" -Value 1048576
+        Set-ModelProperty -Object $supplemental -Name "max_context_window" -Value 1048576
     }
+
+    [void]$updatedModels.Add($supplemental)
+    return $updatedModels.ToArray()
+}
+
+function Sync-CodexRuntimeCatalog {
+    param(
+        [Parameter(Mandatory)]
+        [object]$Catalog
+    )
+
+    $beforeJson = $Catalog | ConvertTo-Json -Depth 100
+    $Catalog.models = @(Get-ManagedCatalogModels -Catalog $Catalog)
+    $afterJson = $Catalog | ConvertTo-Json -Depth 100
+    $changed = $beforeJson -cne $afterJson
 
     if (-not $changed) {
         Write-Host "Codex 运行时模型目录无需更新"
         return $false
     }
 
-    $Catalog.models = $updatedModels.ToArray()
     $catalogDirectory = Split-Path -Parent $CatalogPath
     $tempPath = "$CatalogPath.tmp-$PID"
     $backupPath = Join-Path $catalogDirectory "models_cache.json.bak-$PID"
@@ -107,10 +171,10 @@ function Sync-CodexRuntimeCatalog {
         [System.IO.File]::WriteAllText($tempPath, $updatedJson, $utf8NoBom)
 
         $validated = Get-Content -Raw -LiteralPath $tempPath | ConvertFrom-Json
-        if (@($validated.models).Count -ne $AllowedModelSlugs.Count) {
-            throw "Codex 运行时目录写入校验失败：模型数量不是 $($AllowedModelSlugs.Count)"
+        if (@($validated.models).Count -ne $ManagedModelSlugs.Count) {
+            throw "Codex 运行时目录写入校验失败：模型数量不是 $($ManagedModelSlugs.Count)"
         }
-        foreach ($slug in $AllowedModelSlugs) {
+        foreach ($slug in $ManagedModelSlugs) {
             $entry = @(
                 $validated.models | Where-Object { [string]$_.slug -eq $slug }
             ) | Select-Object -First 1
@@ -121,7 +185,7 @@ function Sync-CodexRuntimeCatalog {
 
         Move-Item -LiteralPath $tempPath -Destination $CatalogPath -Force
         Remove-Item -LiteralPath $backupPath -Force
-        Write-Host "Codex 运行时模型目录已同步（仅保留 $($AllowedModelSlugs -join ', ')）"
+        Write-Host "Codex 运行时模型目录已同步（保留 $($ManagedModelSlugs -join ', ')）"
         return $true
     }
     catch {
@@ -163,24 +227,8 @@ function Sync-CodexDisplayCatalog {
         throw "Codex 显示模型目录没有 models 数组"
     }
 
-    $existingModels = @($catalog.models)
-    $updatedModels = [System.Collections.Generic.List[object]]::new()
-    foreach ($slug in $AllowedModelSlugs) {
-        $existing = @(
-            $existingModels | Where-Object { [string]$_.slug -eq $slug }
-        ) | Select-Object -First 1
-
-        if ($null -eq $existing) {
-            throw "Codex 显示目录缺少统一模型: $slug"
-        }
-
-        if ([string]$existing.visibility -ne "list") {
-            $existing.visibility = "list"
-        }
-        [void]$updatedModels.Add($existing)
-    }
-
-    $catalog.models = $updatedModels.ToArray()
+    $existingJson = $catalog | ConvertTo-Json -Depth 100
+    $catalog.models = @(Get-ManagedCatalogModels -Catalog $catalog)
     $catalogDirectory = Split-Path -Parent $CodexDisplayCatalogPath
     if (-not (Test-Path -LiteralPath $catalogDirectory)) {
         throw "Codex 显示模型目录所在目录不存在: $catalogDirectory"
@@ -191,12 +239,7 @@ function Sync-CodexDisplayCatalog {
     $backupPath = Join-Path $catalogDirectory "models.json.bak-$PID"
     $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 
-    $existingJson = $null
-    if (Test-Path -LiteralPath $CodexDisplayCatalogPath) {
-        $existingJson = [System.IO.File]::ReadAllText($CodexDisplayCatalogPath)
-    }
-
-    if ($null -ne $existingJson -and $existingJson -ceq $updatedJson) {
+    if ($existingJson -ceq $updatedJson) {
         Write-Host "Codex 显示模型目录无需更新"
         return $false
     }
@@ -208,10 +251,10 @@ function Sync-CodexDisplayCatalog {
         [System.IO.File]::WriteAllText($tempPath, $updatedJson, $utf8NoBom)
 
         $validated = Get-Content -Raw -LiteralPath $tempPath | ConvertFrom-Json
-        if (@($validated.models).Count -ne $AllowedModelSlugs.Count) {
-            throw "Codex 显示模型目录写入校验失败：模型数量不是 $($AllowedModelSlugs.Count)"
+        if (@($validated.models).Count -ne $ManagedModelSlugs.Count) {
+            throw "Codex 显示模型目录写入校验失败：模型数量不是 $($ManagedModelSlugs.Count)"
         }
-        foreach ($slug in $AllowedModelSlugs) {
+        foreach ($slug in $ManagedModelSlugs) {
             $entry = @(
                 $validated.models | Where-Object { [string]$_.slug -eq $slug }
             ) | Select-Object -First 1
@@ -228,7 +271,7 @@ function Sync-CodexDisplayCatalog {
         if (Test-Path -LiteralPath $backupPath) {
             Remove-Item -LiteralPath $backupPath -Force
         }
-        Write-Host "Codex 显示模型目录已同步（仅保留 $($AllowedModelSlugs -join ', ')）"
+        Write-Host "Codex 显示模型目录已同步（保留 $($ManagedModelSlugs -join ', ')）"
         return $true
     }
     catch {

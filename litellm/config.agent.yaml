@@ -2,7 +2,8 @@
 #
 # model_list 中 BEGIN/END GENERATED GPT MODELS 之间的内容由
 # sync-agent-gpt-models.ps1 从 Codex 运行时目录按统一三模型白名单生成；
-# models_cache.json、models.json 与本文件的 model_list 应保持完全一致。
+# models_cache.json、models.json 与本文件的 GPT model_list 保持一致；
+# OpenCode Go supplemental route 位于生成区块之外，由本模板持有。
 #
 # 安全约定：
 # - 密钥只经环境变量注入，绝不写入本文件/日志/仓库。
@@ -29,6 +30,15 @@ model_list:
       model: 'chatgpt/gpt-5.6-luna'
       timeout: 900
   # END GENERATED GPT MODELS
+  # OpenCode Go supplemental model；密钥只从当前用户环境变量注入。
+  - model_name: 'opencode-go/muse-spark-1.3-contributor'
+    model_info:
+      mode: responses
+    litellm_params:
+      model: 'openai/muse-spark-1.3-contributor'
+      api_base: https://opencode.ai/zen/go/v1
+      api_key: os.environ/OPENCODEGO_API_KEY
+      timeout: 60
 litellm_settings:
   cache: false
   callbacks: []
