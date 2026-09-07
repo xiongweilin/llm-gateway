@@ -135,6 +135,30 @@ def test_chat_response_is_converted_to_responses_function_call() -> None:
     assert converted["usage"]["output_tokens"] == 4
 
 
+def test_chat_response_without_usage_emits_valid_responses_usage() -> None:
+    converted = bridge.chat_response_to_responses(
+        {
+            "id": "chatcmpl_no_usage",
+            "model": "opencode-go/omen-alpha",
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": "done"},
+                }
+            ],
+        },
+        response_model="opencode-go/omen-alpha",
+    )
+
+    assert converted["usage"] == {
+        "input_tokens": 0,
+        "input_tokens_details": {"cached_tokens": 0},
+        "output_tokens": 0,
+        "output_tokens_details": {"reasoning_tokens": 0},
+        "total_tokens": 0,
+    }
+
+
 def test_chat_stream_bridge_preserves_text_and_tool_call_events() -> None:
     bridge_instance = bridge.ChatStreamBridge(
         response_model="opencode-go/omen-alpha",
@@ -155,6 +179,9 @@ def test_chat_stream_bridge_preserves_text_and_tool_call_events() -> None:
     assert "response.output_text.delta" in event_types
     assert "response.function_call_arguments.delta" in event_types
     completed = next(event for event in events if event["type"] == "response.completed")
+    assert completed["response"]["usage"]["input_tokens"] == 0
+    assert completed["response"]["usage"]["output_tokens"] == 0
+    assert completed["response"]["usage"]["total_tokens"] == 0
     output = completed["response"]["output"]
     assert output[0]["type"] == "message"
     assert output[0]["content"][0]["text"] == "hi"

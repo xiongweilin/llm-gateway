@@ -242,21 +242,41 @@ def _chat_text(content) -> str:
 
 
 def _response_usage(usage) -> dict:
-    if not isinstance(usage, dict):
-        return {}
-    normalized = dict(usage)
-    if "input_tokens" not in normalized and "prompt_tokens" in normalized:
-        normalized["input_tokens"] = normalized["prompt_tokens"]
-    if "output_tokens" not in normalized and "completion_tokens" in normalized:
-        normalized["output_tokens"] = normalized["completion_tokens"]
-    if "total_tokens" not in normalized and "total_tokens" in usage:
-        normalized["total_tokens"] = usage["total_tokens"]
-    prompt_details = usage.get("prompt_tokens_details")
+    source_usage = usage if isinstance(usage, dict) else {}
+    normalized = dict(source_usage)
+
+    def token_count(*keys: str) -> int | None:
+        for key in keys:
+            value = normalized.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                return value
+        return None
+
+    # Responses clients require the canonical usage fields even when the
+    # Chat Completions provider omits usage on a streamed response.  Preserve
+    # provider values when present, and use zero as an explicit "unavailable"
+    # value instead of emitting an invalid empty usage object.
+    input_tokens = token_count("input_tokens", "prompt_tokens")
+    output_tokens = token_count("output_tokens", "completion_tokens")
+    total_tokens = token_count("total_tokens")
+    input_tokens = 0 if input_tokens is None else input_tokens
+    output_tokens = 0 if output_tokens is None else output_tokens
+    total_tokens = (
+        input_tokens + output_tokens
+        if total_tokens is None
+        else total_tokens
+    )
+    normalized["input_tokens"] = input_tokens
+    normalized["output_tokens"] = output_tokens
+    normalized["total_tokens"] = total_tokens
+    prompt_details = source_usage.get("prompt_tokens_details")
     if "input_tokens_details" not in normalized and isinstance(prompt_details, dict):
         normalized["input_tokens_details"] = prompt_details
-    completion_details = usage.get("completion_tokens_details")
+    completion_details = source_usage.get("completion_tokens_details")
     if "output_tokens_details" not in normalized and isinstance(completion_details, dict):
         normalized["output_tokens_details"] = completion_details
+    normalized.setdefault("input_tokens_details", {"cached_tokens": 0})
+    normalized.setdefault("output_tokens_details", {"reasoning_tokens": 0})
     return normalized
 
 
