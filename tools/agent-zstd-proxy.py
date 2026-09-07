@@ -34,6 +34,7 @@ DEFAULT_CONTROL_PLANE_BACKEND = "https://chatgpt.com/backend-api/codex"
 CONTROL_PLANE_PATH_PREFIX = "/v1/alpha"
 OPENCODE_SESSION_HEADER = "x-opencode-session"
 OPENCODE_MODEL_PREFIX = "opencode-go/"
+MUSE_MODEL_MARKER = "muse-spark-"
 _OPENCODE_PROCESS_SESSION = f"codex-{uuid.uuid4().hex}"
 PLAINTEXT_COLLABORATION_TOOLS = {"spawn_agent", "send_message", "followup_task"}
 COLLABORATION_TOOLS = PLAINTEXT_COLLABORATION_TOOLS | {
@@ -100,6 +101,13 @@ def is_opencode_model(model: object) -> bool:
     """Return whether a Responses request targets the OpenCode Go route."""
     return isinstance(model, str) and (
         model.startswith(OPENCODE_MODEL_PREFIX) or model.startswith("muse-spark-")
+    )
+
+
+def is_muse_model(model: object) -> bool:
+    """Return whether a model is the Muse Spark OpenCode Go variant."""
+    return isinstance(model, str) and model.startswith(
+        f"{OPENCODE_MODEL_PREFIX}{MUSE_MODEL_MARKER}"
     )
 
 
@@ -187,6 +195,46 @@ def ensure_opencode_session(
     extra_headers[OPENCODE_SESSION_HEADER] = session
     obj["extra_headers"] = extra_headers
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode(), session
+
+
+MUSE_AUTONOMOUS_INSTRUCTIONS = (
+    "You are operating as an autonomous coding agent inside a host that executes "
+    "your tools. Continue the user's task across tool calls without waiting for "
+    "the user to say 'continue'. After each tool result, immediately take the "
+    "next necessary action. If a tool reports a running execution or cell ID and "
+    "the wait tool is available, call wait with that ID and then continue; do not "
+    "end the turn merely to report that you are waiting. Only end with a user-facing "
+    "message when the requested task is complete, when the user explicitly asks "
+    "you to stop, or when a specific user decision or permission is genuinely "
+    "required. Do not ask the user to send 'continue' merely to advance the same task. "
+    "When an available tool is needed, emit a real function_call for one of the "
+    "declared tools now. Do not describe a planned tool action as a status message, "
+    "and do not claim an action is complete until its tool result is present."
+)
+
+
+def ensure_muse_autonomous_instructions(body: bytes) -> bytes:
+    """Keep Muse in the host agent loop after each completed tool step."""
+    try:
+        obj = json.loads(body)
+    except Exception:
+        return body
+    model = obj.get("model")
+    if not is_muse_model(model):
+        return body
+
+    current = obj.get("instructions")
+    if isinstance(current, str):
+        if MUSE_AUTONOMOUS_INSTRUCTIONS in current:
+            return body
+        instructions = f"{current.rstrip()}\n\n{MUSE_AUTONOMOUS_INSTRUCTIONS}"
+    elif current is None:
+        instructions = MUSE_AUTONOMOUS_INSTRUCTIONS
+    else:
+        return body
+
+    obj["instructions"] = instructions
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
 
 
 def is_control_plane_path(path: str) -> bool:
@@ -299,10 +347,23 @@ def request_summary(body: bytes) -> dict[str, object]:
     if isinstance(tools, list):
         for tool in tools:
             visit_tool_declaration(tool)
+    tool_choice = obj.get("tool_choice")
+    if isinstance(tool_choice, dict):
+        tool_choice_summary = {
+            key: tool_choice.get(key)
+            for key in ("type", "name", "namespace")
+            if isinstance(tool_choice.get(key), str)
+        }
+    elif isinstance(tool_choice, str):
+        tool_choice_summary = tool_choice
+    else:
+        tool_choice_summary = None
     return {
         "body_bytes": len(body),
         "estimated_tokens": _json_tokens(obj),
         "model": obj.get("model"),
+        "stream": bool(obj.get("stream", False)),
+        "tool_choice": tool_choice_summary,
         "input_items": len(items),
         "input_roles": dict(sorted(roles.items())),
         "input_types": dict(sorted(types.items())),
@@ -314,7 +375,9 @@ def request_summary(body: bytes) -> dict[str, object]:
         ],
         "agent_message_content_types": dict(sorted(agent_content_types.items())),
         "instructions_chars": len(instructions) if isinstance(instructions, str) else 0,
+        "tool_result_items": sum(1 for item in items if isinstance(item, dict) and item.get("type") in TOOL_OUTPUT_TYPES),
         "tools_count": len(tools) if isinstance(tools, list) else 0,
+        "function_tools_count": tool_declaration_types.get("function", 0),
         "tools_estimated_tokens": _json_tokens(tools) if isinstance(tools, list) else 0,
         "tool_declaration_types": dict(sorted(tool_declaration_types.items())),
         "tool_declaration_names": dict(sorted(tool_declaration_names.items())),
@@ -1162,7 +1225,7 @@ def aggregate_responses_sse(
         except Exception:
             continue
         event_type = event.get("type")
-        if event_type == "response.output_item.done" and isinstance(event.get("item"), dict):
+        if event_type in {"response.output_item.added", "response.output_item.done"} and isinstance(event.get("item"), dict):
             output_index = event.get("output_index")
             if isinstance(output_index, int):
                 output_items[output_index] = event["item"]
@@ -1323,6 +1386,7 @@ async def handle(
     custom_tool_names: set[str] = set()
     custom_call_item_ids: dict[str, str] = {}
     opencode_session: str | None = None
+    model: object = None
     if req.method == "POST" and "/responses" in req.path:
         try:
             request_obj = json.loads(dec)
@@ -1346,6 +1410,7 @@ async def handle(
         dec = normalize_opencode_tool_descriptions(dec)
         dec = normalize_tool_schemas(dec)
         dec, opencode_session = ensure_opencode_session(dec, req.headers)
+        dec = ensure_muse_autonomous_instructions(dec)
         normalized = request_summary(dec)
         if normalized.get("input_types") != before.get("input_types"):
             log.info("request summary after compatibility %s", json.dumps(normalized, sort_keys=True))
@@ -1388,6 +1453,7 @@ async def handle(
         req.query_string,
         strip_v1_prefix=using_control_plane,
     )
+
     try:
         async with session.request(
             req.method, url, data=dec, headers=headers,
