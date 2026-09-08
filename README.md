@@ -77,6 +77,10 @@ checkpoint operation it sends SSE comments as connection heartbeats; it does
 not emit a visible waiting message, a fake tool call, or a remote compaction
 output item.
 
+If Codex still sends a `compaction_trigger` from an existing or stale session,
+4100 removes that marker before the Muse precompaction decision and never
+forwards it to LiteLLM or the provider.
+
 The default Muse precompaction budget is `900000` estimated tokens, below the
 current Codex effective threshold of about `950000`. It can be tuned with
 `MUSE_PRECOMPACTION_TOKEN_BUDGET`. The compaction state is in-memory and keyed

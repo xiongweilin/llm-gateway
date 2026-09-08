@@ -903,11 +903,6 @@ def muse_needs_precompaction(body: bytes, model: object) -> bool:
         return False
     if not isinstance(obj, dict) or not isinstance(obj.get("input"), list):
         return False
-    if any(
-        isinstance(item, dict) and item.get("type") == "compaction_trigger"
-        for item in obj["input"]
-    ):
-        return False
     return _json_tokens(obj) > MUSE_PRECOMPACTION_TOKEN_BUDGET
 
 
@@ -2204,7 +2199,7 @@ async def handle(
             before = request_summary(dec)
             log.info("request summary %s", json.dumps(before, sort_keys=True))
             dec = normalize_scalar_responses_input(dec)
-            if is_opencode_model(model) and not is_muse_model(model):
+            if is_opencode_model(model):
                 dec = normalize_opencode_compaction_triggers(dec)
             try:
                 refreshed = json.loads(dec)

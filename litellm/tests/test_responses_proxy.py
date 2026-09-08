@@ -127,7 +127,7 @@ def test_agent_message_conversion_is_scoped_to_opencode_plaintext() -> None:
     assert json.loads(proxy.normalize_agent_messages(json.dumps(chatgpt).encode())) == chatgpt
 
 
-def test_compaction_trigger_normalization_remains_for_non_muse_opencode() -> None:
+def test_compaction_trigger_normalization_remains_for_opencode() -> None:
     request = {
         "model": "opencode-go/omen-alpha",
         "input": [
@@ -145,12 +145,23 @@ def test_compaction_trigger_normalization_remains_for_non_muse_opencode() -> Non
         "function_call",
     ]
 
+    request["model"] = "opencode-go/muse-spark-1.3-contributor"
+    muse_normalized = json.loads(
+        proxy.normalize_opencode_compaction_triggers(
+            json.dumps(request).encode()
+        )
+    )
+    assert [item["type"] for item in muse_normalized["input"]] == [
+        "message",
+        "function_call",
+    ]
+
     request["model"] = "gpt-5.6-luna"
     raw = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode()
     assert proxy.normalize_opencode_compaction_triggers(raw) is raw
 
 
-def test_muse_precompaction_is_scoped_and_skips_codex_trigger() -> None:
+def test_muse_precompaction_is_scoped_and_handles_codex_trigger() -> None:
     request = {
         "model": "opencode-go/muse-spark-1.3-contributor",
         "input": [
@@ -171,7 +182,7 @@ def test_muse_precompaction_is_scoped_and_skips_codex_trigger() -> None:
 
         request["input"].insert(1, {"type": "compaction_trigger", "id": "c1"})
         triggered = json.dumps(request, separators=(",", ":")).encode()
-        assert not proxy.muse_needs_precompaction(
+        assert proxy.muse_needs_precompaction(
             triggered, "opencode-go/muse-spark-1.3-contributor"
         )
     finally:
