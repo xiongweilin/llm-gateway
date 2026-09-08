@@ -278,7 +278,7 @@ def test_muse_compaction_trigger_detection_is_stable() -> None:
     assert proxy._has_compaction_trigger(request)
 
 
-def test_muse_precompaction_rewrites_history_and_reuses_state() -> None:
+def test_muse_compaction_checkpoint_rewrites_history_and_reuses_state() -> None:
     request = {
         "model": "opencode-go/muse-spark-1.3-contributor",
         "input": [
@@ -294,7 +294,7 @@ def test_muse_precompaction_rewrites_history_and_reuses_state() -> None:
         ],
     }
     raw = json.dumps(request, separators=(",", ":")).encode()
-    old_budget = proxy.MUSE_PRECOMPACTION_TOKEN_BUDGET
+    old_budget = proxy.MUSE_COMPACTION_TOKEN_BUDGET
     old_keep = proxy.MUSE_COMPACTION_KEEP_TOKEN_BUDGET
     old_states = proxy._MUSE_COMPACTION_STATES.copy()
     old_locks = proxy._MUSE_COMPACTION_LOCKS.copy()
@@ -306,14 +306,14 @@ def test_muse_precompaction_rewrites_history_and_reuses_state() -> None:
 
     original_generator = proxy._generate_muse_checkpoint
     try:
-        proxy.MUSE_PRECOMPACTION_TOKEN_BUDGET = 30_000
+        proxy.MUSE_COMPACTION_TOKEN_BUDGET = 30_000
         proxy.MUSE_COMPACTION_KEEP_TOKEN_BUDGET = 4_000
         proxy._MUSE_COMPACTION_STATES.clear()
         proxy._MUSE_COMPACTION_LOCKS.clear()
         proxy._generate_muse_checkpoint = fake_checkpoint
 
         compacted, changed, compacted_session = asyncio.run(
-            proxy.maybe_precompact_muse(
+            proxy.create_muse_compaction_checkpoint(
                 raw,
                 "codex-test-session",
                 None,
@@ -330,7 +330,7 @@ def test_muse_precompaction_rewrites_history_and_reuses_state() -> None:
         assert compacted_obj["input"][-1] == request["input"][-1]
 
         compacted_again, changed_again, compacted_session_again = asyncio.run(
-            proxy.maybe_precompact_muse(
+            proxy.create_muse_compaction_checkpoint(
                 raw,
                 "codex-test-session",
                 None,
@@ -344,7 +344,7 @@ def test_muse_precompaction_rewrites_history_and_reuses_state() -> None:
         assert len(calls) == 1
     finally:
         proxy._generate_muse_checkpoint = original_generator
-        proxy.MUSE_PRECOMPACTION_TOKEN_BUDGET = old_budget
+        proxy.MUSE_COMPACTION_TOKEN_BUDGET = old_budget
         proxy.MUSE_COMPACTION_KEEP_TOKEN_BUDGET = old_keep
         proxy._MUSE_COMPACTION_STATES.clear()
         proxy._MUSE_COMPACTION_STATES.update(old_states)
@@ -352,10 +352,10 @@ def test_muse_precompaction_rewrites_history_and_reuses_state() -> None:
         proxy._MUSE_COMPACTION_LOCKS.update(old_locks)
 
 
-def test_muse_precompaction_waiter_unwraps_body() -> None:
+def test_muse_compaction_waiter_unwraps_body() -> None:
     async def run_waiter():
         task = asyncio.create_task(asyncio.sleep(0, result=(b"compacted", True, "session-2")))
-        return await proxy._await_muse_precompaction(task, None, False)
+        return await proxy._await_muse_compaction(task, None, False)
 
     body, prepared_response, provider_session = asyncio.run(run_waiter())
     assert body == b"compacted"

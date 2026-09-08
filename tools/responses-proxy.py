@@ -84,12 +84,11 @@ def _env_int(name: str, default: int, minimum: int) -> int:
     return parsed
 
 
-# Codex currently advertises a 950k effective window in the affected setup.
-# Keep enough margin so the gateway compacts before Codex emits its remote
-# compaction trigger. These are intentionally Muse-only and can be tuned
-# without changing GPT or Omen routes.
-MUSE_PRECOMPACTION_TOKEN_BUDGET = _env_int(
-    "MUSE_PRECOMPACTION_TOKEN_BUDGET", 900_000, 10_000
+# These budgets bound the checkpoint that 4100 creates only after Codex emits
+# an explicit compaction trigger. They are Muse-only and do not change GPT or
+# Omen routes.
+MUSE_COMPACTION_TOKEN_BUDGET = _env_int(
+    "MUSE_COMPACTION_TOKEN_BUDGET", 900_000, 10_000
 )
 MUSE_COMPACTION_KEEP_TOKEN_BUDGET = _env_int(
     "MUSE_COMPACTION_KEEP_TOKEN_BUDGET", 30_000, 4_096
@@ -1036,20 +1035,14 @@ async def _generate_muse_checkpoint(
         return summary
 
 
-async def maybe_precompact_muse(
+async def create_muse_compaction_checkpoint(
     body: bytes,
     opencode_session: str,
     session: aiohttp.ClientSession,
     backend: str,
     headers: Mapping[str, str],
-    force: bool = False,
 ) -> tuple[bytes, bool, str]:
-    """Compact only Muse before its request reaches the provider.
-
-    ``force`` is used when Codex explicitly requests a compaction checkpoint.
-    Normal requests still use the lower gateway budget to avoid reaching that
-    protocol boundary in the first place.
-    """
+    """Create a Muse checkpoint only after Codex requests compaction."""
     try:
         obj = json.loads(body)
     except (TypeError, ValueError):
@@ -1067,11 +1060,6 @@ async def maybe_precompact_muse(
 
         effective_session = state.provider_session if state is not None else opencode_session
 
-        # A concurrent request may have populated the state while this one
-        # waited for the per-session lock, so re-check the current body.
-        if _json_tokens(obj) <= MUSE_PRECOMPACTION_TOKEN_BUDGET and not force:
-            return body, False, effective_session
-
         history = items[1:]
         fixed = dict(obj)
         fixed["input"] = []
@@ -1080,14 +1068,14 @@ async def maybe_precompact_muse(
             4_096,
             min(
                 MUSE_COMPACTION_KEEP_TOKEN_BUDGET,
-                MUSE_PRECOMPACTION_TOKEN_BUDGET - fixed_tokens - 12_000,
+                MUSE_COMPACTION_TOKEN_BUDGET - fixed_tokens - 12_000,
             ),
         )
         tail_start = _safe_tail_start(items, available_tail_budget)
         target_prefix_count = max(0, tail_start - 1)
         if target_prefix_count == 0:
             log.warning(
-                "Muse precompaction skipped: fixed request envelope exceeds budget"
+                "Muse compaction skipped: fixed request envelope exceeds budget"
             )
             return body, False, effective_session
 
@@ -1146,7 +1134,7 @@ async def maybe_precompact_muse(
             separators=(",", ":"),
         ).encode()
         log.info(
-            "Muse precompaction applied method=%s items=%d->%d tokens=%d->%d",
+            "Muse compaction checkpoint applied method=%s items=%d->%d tokens=%d->%d",
             method,
             len(items),
             len(transformed["input"]),
@@ -1154,7 +1142,7 @@ async def maybe_precompact_muse(
             _json_tokens(transformed),
         )
         if state is None:
-            log.info("Muse provider session epoch created after precompaction")
+            log.info("Muse provider session epoch created after compaction")
         return transformed_body, True, new_state.provider_session
 
 
@@ -1269,7 +1257,7 @@ async def _compaction_keepalive(response: aiohttp.web.StreamResponse) -> None:
         raise
 
 
-async def _await_muse_precompaction(
+async def _await_muse_compaction(
     task: asyncio.Task,
     req: aiohttp.web.Request,
     caller_stream: bool,
@@ -2545,19 +2533,18 @@ async def handle(
             normalized = request_summary(dec)
             if normalized.get("input_types") != before.get("input_types"):
                 log.info("request summary after compatibility %s", json.dumps(normalized, sort_keys=True))
-            if is_muse_model(model):
+            if is_muse_model(model) and codex_compaction_requested:
                 compaction_source_body = dec
                 compaction_source_session = (
                     opencode_session or _OPENCODE_PROCESS_SESSION
                 )
                 compact_task = asyncio.create_task(
-                    maybe_precompact_muse(
+                    create_muse_compaction_checkpoint(
                         dec,
                         compaction_source_session,
                         session,
                         backend,
                         req.headers,
-                        force=codex_compaction_requested,
                     )
                 )
                 try:
@@ -2565,7 +2552,7 @@ async def handle(
                         dec,
                         prepared_stream_response,
                         opencode_session,
-                    ) = await _await_muse_precompaction(
+                    ) = await _await_muse_compaction(
                         compact_task,
                         req,
                         caller_stream,
@@ -2574,7 +2561,7 @@ async def handle(
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:  # noqa: BLE001
-                    log.warning("Muse precompaction failed before upstream request: %s", exc)
+                    log.warning("Muse compaction checkpoint failed: %s", exc)
                     if prepared_stream_response is not None:
                         return await _finish_prepared_stream_error(
                             prepared_stream_response,
@@ -2886,7 +2873,7 @@ async def handle(
                 await response.prepare(req)
             elif not 200 <= up.status < 300:
                 log.warning(
-                    "Muse upstream returned HTTP %d after precompaction response started",
+                    "Muse upstream returned HTTP %d after compaction response started",
                     up.status,
                 )
             rewrite_sse = req.path == RESPONSES_PATH and upstream_is_sse

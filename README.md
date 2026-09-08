@@ -69,37 +69,23 @@ other error classes are not enabled by this policy.
 
 ## Muse context handling
 
-The Muse Spark 1.3 Contributor route uses a gateway-side precompaction guard on
-4100 only. When the estimated Muse request reaches the configured precompaction
-budget, 4100 generates a bounded checkpoint, keeps the newest tool-call/result
-history, rotates to a fresh upstream `x-opencode-session` epoch, and forwards a
-normal Responses request to 4101. During a streamed checkpoint operation it
-sends SSE comments as connection heartbeats, so the client remains connected
-while the checkpoint is generated.
+Codex owns when the Muse Spark 1.3 Contributor conversation is compacted. The
+gateway does not proactively summarize normal Muse requests or rotate the
+provider session just because a local estimate reaches a threshold.
 
-If Codex sends a `compaction_trigger`, 4100 handles the protocol boundary
-locally: it runs the same Muse checkpoint path and returns a Responses
+When Codex sends a `compaction_trigger`, 4100 handles that protocol boundary
+locally: it creates the Muse checkpoint and returns a Responses
 `response.compaction` containing the retained user messages followed by exactly
-one gateway compaction item. The trigger and compaction item are never sent to
-OpenCode Go. On the next Muse request, 4100 resolves its opaque checkpoint
-handle back into a normal historical message before forwarding the request, so
-Codex can discard the old transcript while the provider receives only input
-item types it supports. Repeated requests reuse the existing checkpoint state
-and rotated provider epoch for the same compacted prefix.
+one gateway compaction item. On the next Muse request, 4100 resolves its
+opaque checkpoint handle back into a normal historical message before
+forwarding the request, so OpenCode Go receives only input item types it
+supports. This path runs only for an explicit Codex compaction request.
 
-The default Muse precompaction budget is `900000` estimated tokens, below the
-current Codex effective threshold of about `950000`. It can be tuned with
-`MUSE_PRECOMPACTION_TOKEN_BUDGET`. The compaction state is in-memory and keyed
-by the original opaque Codex session plus the conversation head; a gateway
-restart discards it and the next long request rebuilds both the checkpoint and
-the provider session epoch. GPT routes, Omen, and the 4102 Chat Completions path
-do not use this guard.
-
-The Codex model catalog marks Muse with `use_responses_lite=false` and an
-`auto_compact_token_limit` of `900000`. The gateway still handles any
-`compaction_trigger` emitted by an existing Codex session locally. GPT and Omen
-retain their existing capability flags. Catalog changes do not restart Codex;
-restart it separately after the user chooses a safe boundary.
+The compaction target budget is `900000` estimated tokens and can be tuned with
+`MUSE_COMPACTION_TOKEN_BUDGET`. GPT routes, Omen, and the 4102 Chat Completions
+path do not use this Responses compaction checkpoint path. The Codex model
+catalog marks Muse with `use_responses_lite=false` and an
+`auto_compact_token_limit` of `900000`.
 
 ## Local development
 
