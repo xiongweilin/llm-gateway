@@ -126,6 +126,29 @@ def test_agent_message_conversion_is_scoped_to_opencode_plaintext() -> None:
     assert json.loads(proxy.normalize_agent_messages(json.dumps(chatgpt).encode())) == chatgpt
 
 
+def test_compaction_trigger_is_removed_only_for_opencode() -> None:
+    request = {
+        "model": "opencode-go/muse-spark-1.3-contributor",
+        "input": [
+            {"type": "message", "role": "user", "content": []},
+            {"type": "compaction_trigger", "id": "compact_1"},
+            {"type": "function_call", "name": "exec", "arguments": "{}"},
+        ],
+    }
+
+    normalized = json.loads(
+        proxy.normalize_opencode_compaction_triggers(json.dumps(request).encode())
+    )
+    assert [item["type"] for item in normalized["input"]] == [
+        "message",
+        "function_call",
+    ]
+
+    request["model"] = "gpt-5.6-luna"
+    raw = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode()
+    assert proxy.normalize_opencode_compaction_triggers(raw) is raw
+
+
 def test_additional_tools_are_lifted_for_opencode() -> None:
     request = {
         "model": "opencode-go/muse-spark-1.3-contributor",

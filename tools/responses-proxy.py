@@ -579,6 +579,44 @@ def normalize_agent_messages(body: bytes) -> bytes:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
 
 
+def normalize_opencode_compaction_triggers(body: bytes) -> bytes:
+    """Remove Codex-only compaction markers from OpenCode Go input history.
+
+    ``compaction_trigger`` is an internal Codex Responses item.  It is useful
+    to Codex's own context-management path, but Console Go validates the
+    public input item union and rejects it.  Keep the item untouched for the
+    ChatGPT-backed models and remove it only before an OpenCode Go request is
+    sent upstream.
+    """
+    try:
+        obj = json.loads(body)
+    except Exception:
+        return body
+
+    model = obj.get("model")
+    inp = obj.get("input")
+    if (
+        not isinstance(model, str)
+        or not model.startswith("opencode-go/")
+        or not isinstance(inp, list)
+    ):
+        return body
+
+    normalized = []
+    removed = 0
+    for item in inp:
+        if isinstance(item, dict) and item.get("type") == "compaction_trigger":
+            removed += 1
+            continue
+        normalized.append(item)
+
+    if not removed:
+        return body
+    obj["input"] = normalized
+    log.info("OpenCode Go compaction trigger compatibility: removed=%d", removed)
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
+
+
 def normalize_opencode_additional_tools(body: bytes) -> bytes:
     """Lift Codex-only ``additional_tools`` items into top-level ``tools``.
 
@@ -1583,6 +1621,8 @@ async def handle(
             before = request_summary(dec)
             log.info("request summary %s", json.dumps(before, sort_keys=True))
             dec = normalize_scalar_responses_input(dec)
+            if is_opencode_model(model):
+                dec = normalize_opencode_compaction_triggers(dec)
             try:
                 refreshed = json.loads(dec)
                 if isinstance(refreshed, dict):
