@@ -1183,6 +1183,7 @@ def _build_muse_compaction_response(
     state: MuseCompactionState,
     session: str,
     model: str = MUSE_COMPACTION_MODEL,
+    usage_body: bytes | None = None,
 ) -> dict:
     try:
         obj = json.loads(body)
@@ -1191,10 +1192,14 @@ def _build_muse_compaction_response(
     items = obj.get("input") if isinstance(obj, dict) else []
     if not isinstance(items, list):
         items = []
+    try:
+        usage_obj = json.loads(usage_body) if usage_body is not None else obj
+    except (TypeError, ValueError):
+        usage_obj = obj
 
     token = _remember_muse_compaction_token(session, state)
     token_digest = hashlib.sha256(token.encode()).hexdigest()
-    input_tokens = _json_tokens(obj)
+    input_tokens = _json_tokens(usage_obj)
     output_tokens = _json_tokens(state.summary)
     output = _muse_compaction_user_messages(items)
     output.append(
@@ -2611,6 +2616,7 @@ async def handle(
                         compaction_state,
                         compaction_source_session or _OPENCODE_PROCESS_SESSION,
                         model if isinstance(model, str) else MUSE_COMPACTION_MODEL,
+                        usage_body=dec,
                     )
                     log.info(
                         "Muse compaction response generated output_items=%d compaction_items=%d",

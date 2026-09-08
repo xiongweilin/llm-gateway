@@ -234,6 +234,20 @@ def test_muse_compaction_response_contains_one_protocol_item() -> None:
             response["usage"]["input_tokens"] + response["usage"]["output_tokens"]
         )
 
+        compacted_request = {
+            "model": request["model"],
+            "input": [request["input"][0], request["input"][2]],
+        }
+        compacted_response = proxy._build_muse_compaction_response(
+            json.dumps(request, separators=(",", ":")).encode(),
+            state,
+            "codex-session",
+            usage_body=json.dumps(compacted_request, separators=(",", ":")).encode(),
+        )
+        assert compacted_response["usage"]["input_tokens"] == proxy._json_tokens(
+            compacted_request
+        )
+
         wire = proxy._muse_compaction_response_to_sse(response)
         events = [
             json.loads(line[6:])
