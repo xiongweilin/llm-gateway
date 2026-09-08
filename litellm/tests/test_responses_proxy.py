@@ -852,6 +852,21 @@ def test_custom_tool_declarations_are_bridged_for_opencode() -> None:
     assert proxy.normalize_opencode_custom_tools(raw) is raw
 
 
+def test_custom_exec_json_input_is_restored_to_javascript() -> None:
+    assert proxy._custom_input_from_arguments(
+        '{"input":"{\\"cmd\\":\\"Get-Location\\"}"}',
+        "exec",
+    ) == 'return await tools.exec_command({"cmd":"Get-Location"});'
+    assert proxy._custom_input_from_arguments(
+        '{"input":"{\\"code\\":\\"return 1;\\"}"}',
+        "exec",
+    ) == "return 1;"
+    assert proxy._custom_input_from_arguments(
+        '{"input":"const result = 1;"}',
+        "exec",
+    ) == "const result = 1;"
+
+
 def test_namespaced_calls_are_repaired_for_opencode() -> None:
     request = {
         "model": "opencode-go/muse-spark-1.3-contributor",
@@ -962,6 +977,70 @@ def test_custom_function_stream_is_restored_to_codex_custom_call() -> None:
     assert payloads[2]["input"] == "const result = 1;"
     assert payloads[3]["item"]["type"] == "custom_tool_call"
     assert payloads[3]["item"]["input"] == "const result = 1;"
+
+
+def test_custom_exec_json_stream_is_restored_to_executable_javascript() -> None:
+    events = [
+        {
+            "type": "response.output_item.added",
+            "item": {
+                "type": "function_call",
+                "id": "fc_exec_json",
+                "name": "exec",
+                "arguments": "",
+            },
+        },
+        {
+            "type": "response.function_call_arguments.delta",
+            "item_id": "fc_exec_json",
+            "delta": '{"input":"{\\"cmd\\":\\"pwd\\"}"}',
+        },
+        {
+            "type": "response.function_call_arguments.done",
+            "item_id": "fc_exec_json",
+            "arguments": '{"input":"{\\"cmd\\":\\"pwd\\"}"}',
+        },
+        {
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "id": "fc_exec_json",
+                "name": "exec",
+                "arguments": '{"input":"{\\"cmd\\":\\"pwd\\"}"}',
+            },
+        },
+    ]
+    frames = [
+        b"data: " + json.dumps(event).encode() + b"\n\n"
+        for event in events
+    ]
+
+    rewritten_parts = []
+    pending = b""
+    count = 0
+    item_ids = {}
+    argument_buffers = {}
+    for frame in frames:
+        rewritten, pending, changed = proxy.rewrite_sse_collaboration_calls(
+            pending + frame,
+            custom_tool_names={"exec"},
+            custom_call_item_ids=item_ids,
+            custom_call_argument_buffers=argument_buffers,
+        )
+        rewritten_parts.append(rewritten)
+        count += changed
+    rewritten = b"".join(rewritten_parts)
+    assert pending == b""
+    assert count == 5
+    payloads = [
+        json.loads(line[6:])
+        for line in rewritten.splitlines()
+        if line.startswith(b"data: ")
+    ]
+    expected = 'return await tools.exec_command({"cmd":"pwd"});'
+    assert payloads[1]["delta"] == ""
+    assert payloads[2]["input"] == expected
+    assert payloads[3]["item"]["input"] == expected
 
 
 def test_truncate_input_never_leaves_orphaned_tool_outputs() -> None:

@@ -1560,7 +1560,11 @@ def _custom_tool_parameters() -> dict:
         "properties": {
             "input": {
                 "type": "string",
-                "description": "Raw input for this tool.",
+                "description": (
+                    "JavaScript source executed by Codex; return runnable JavaScript, "
+                    "not a JSON command object. For shell commands use "
+                    "return await tools.exec_command({\"cmd\":\"...\"});"
+                ),
             }
         },
         "required": ["input"],
@@ -1601,13 +1605,47 @@ def collect_opencode_custom_tool_names(body: bytes) -> set[str]:
     return _collect_opencode_custom_tool_names(obj)
 
 
-def _custom_arguments(input_value) -> str:
+def _normalize_custom_exec_input(value: str) -> str:
+    """Restore executable JavaScript when a function bridge returns JSON input.
+
+    Codex's ``exec`` custom tool evaluates its input as JavaScript source.  A
+    provider-side function bridge can lose that custom-tool semantic after a
+    context compaction and return a JSON command object instead, for example
+    ``{"cmd":"Get-Location"}``.  Feeding that object directly to the
+    JavaScript executor raises ``Unexpected token ':'``.  Keep genuine source
+    unchanged and translate only the two observed JSON forms into executable
+    source.
+    """
+    if not isinstance(value, str):
+        return value
+    stripped = value.lstrip()
+    if not stripped.startswith("{"):
+        return value
+    try:
+        parsed = json.loads(value)
+    except Exception:
+        return value
+    if not isinstance(parsed, dict):
+        return value
+
+    code = parsed.get("code")
+    if isinstance(code, str) and code.strip():
+        return code
+    if "cmd" not in parsed:
+        return value
+    request = json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
+    return f"return await tools.exec_command({request});"
+
+
+def _custom_arguments(input_value, tool_name: str | None = None) -> str:
     if isinstance(input_value, str):
         raw_input = input_value
     elif input_value is None:
         raw_input = ""
     else:
         raw_input = json.dumps(input_value, ensure_ascii=False, separators=(",", ":"))
+    if tool_name == "exec":
+        raw_input = _normalize_custom_exec_input(raw_input)
     return json.dumps(
         {"input": raw_input},
         ensure_ascii=False,
@@ -1615,7 +1653,7 @@ def _custom_arguments(input_value) -> str:
     )
 
 
-def _custom_input_from_arguments(arguments) -> str:
+def _custom_input_from_arguments(arguments, tool_name: str | None = None) -> str:
     if isinstance(arguments, str):
         try:
             parsed = json.loads(arguments)
@@ -1626,10 +1664,11 @@ def _custom_input_from_arguments(arguments) -> str:
     if isinstance(parsed, dict) and "input" in parsed:
         parsed = parsed["input"]
     if isinstance(parsed, str):
-        return parsed
+        return _normalize_custom_exec_input(parsed) if tool_name == "exec" else parsed
     if parsed is None:
         return ""
-    return json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
+    raw_input = json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
+    return _normalize_custom_exec_input(raw_input) if tool_name == "exec" else raw_input
 
 
 def _convert_custom_history_items(value, custom_names: set[str]):
@@ -1649,7 +1688,7 @@ def _convert_custom_history_items(value, custom_names: set[str]):
         if "call_id" not in converted and isinstance(value.get("custom_tool_call_id"), str):
             converted["call_id"] = value["custom_tool_call_id"]
         converted["type"] = "function_call"
-        converted["arguments"] = _custom_arguments(value.get("input"))
+        converted["arguments"] = _custom_arguments(value.get("input"), name)
         return converted
     if item_type == "custom_tool_call_output":
         converted = {
@@ -1936,11 +1975,17 @@ def _rewrite_opencode_response_tools(
     namespaced_tools: dict[str, tuple[str, str]] | None = None,
     custom_tool_names: set[str] | None = None,
     custom_call_item_ids: dict[str, str] | None = None,
+    custom_call_argument_buffers: dict[str, str] | None = None,
 ) -> int:
     """Restore Codex tool item/call shapes after OpenCode function conversion."""
     namespaced_tools = namespaced_tools or {}
     custom_tool_names = custom_tool_names or set()
     custom_call_item_ids = custom_call_item_ids if custom_call_item_ids is not None else {}
+    custom_call_argument_buffers = (
+        custom_call_argument_buffers
+        if custom_call_argument_buffers is not None
+        else {}
+    )
     changed = 0
 
     if isinstance(value, list):
@@ -1950,6 +1995,7 @@ def _rewrite_opencode_response_tools(
                 namespaced_tools,
                 custom_tool_names,
                 custom_call_item_ids,
+                custom_call_argument_buffers,
             )
         return changed
     if not isinstance(value, dict):
@@ -1961,11 +2007,23 @@ def _rewrite_opencode_response_tools(
         "response.function_call_arguments.delta",
         "response.function_call_arguments.done",
     } and item_id in custom_call_item_ids:
+        custom_name = custom_call_item_ids[item_id]
         if event_type.endswith(".delta"):
             value["type"] = "response.custom_tool_call_input.delta"
+            delta = value.get("delta")
+            if isinstance(delta, str):
+                buffered = custom_call_argument_buffers.get(item_id, "") + delta
+                custom_call_argument_buffers[item_id] = buffered
+                if custom_name == "exec" and buffered.lstrip().startswith("{"):
+                    value["delta"] = ""
+                    changed += 1
         else:
             value["type"] = "response.custom_tool_call_input.done"
-            value["input"] = _custom_input_from_arguments(value.pop("arguments", ""))
+            arguments = value.pop("arguments", "")
+            if not arguments:
+                arguments = custom_call_argument_buffers.get(item_id, "")
+            value["input"] = _custom_input_from_arguments(arguments, custom_name)
+            custom_call_argument_buffers.pop(item_id, None)
         changed += 1
 
     if value.get("type") == "function_call":
@@ -1975,7 +2033,10 @@ def _rewrite_opencode_response_tools(
             if isinstance(item_id, str) and item_id:
                 custom_call_item_ids[item_id] = name
             value["type"] = "custom_tool_call"
-            value["input"] = _custom_input_from_arguments(value.pop("arguments", ""))
+            value["input"] = _custom_input_from_arguments(
+                value.pop("arguments", ""),
+                name,
+            )
             value.pop("namespace", None)
             changed += 1
         elif not value.get("namespace") and isinstance(name, str):
@@ -1990,6 +2051,7 @@ def _rewrite_opencode_response_tools(
             namespaced_tools,
             custom_tool_names,
             custom_call_item_ids,
+            custom_call_argument_buffers,
         )
     return changed
 
@@ -2193,6 +2255,7 @@ def rewrite_sse_collaboration_calls(
     namespaced_tools: dict[str, tuple[str, str]] | None = None,
     custom_tool_names: set[str] | None = None,
     custom_call_item_ids: dict[str, str] | None = None,
+    custom_call_argument_buffers: dict[str, str] | None = None,
     rewrite_collaboration: bool = True,
 ) -> tuple[bytes, bytes, int]:
     """Rewrite complete SSE data lines and retain any split trailing line."""
@@ -2220,6 +2283,7 @@ def rewrite_sse_collaboration_calls(
                         namespaced_tools=namespaced_tools,
                         custom_tool_names=custom_tool_names,
                         custom_call_item_ids=custom_call_item_ids,
+                        custom_call_argument_buffers=custom_call_argument_buffers,
                     )
                 if normalize_function_args:
                     event_changed += _normalize_function_call_arguments(event)
@@ -2450,6 +2514,7 @@ async def handle(
     namespaced_tools: dict[str, tuple[str, str]] = {}
     custom_tool_names: set[str] = set()
     custom_call_item_ids: dict[str, str] = {}
+    custom_call_argument_buffers: dict[str, str] = {}
     opencode_session: str | None = None
     model: object = None
     request_obj: dict = {}
@@ -2765,6 +2830,7 @@ async def handle(
                             namespaced_tools=namespaced_tools,
                             custom_tool_names=custom_tool_names,
                             custom_call_item_ids=custom_call_item_ids,
+                            custom_call_argument_buffers=custom_call_argument_buffers,
                             rewrite_collaboration=collaboration_compatibility,
                         )
                         rewritten_calls += changed
@@ -2778,6 +2844,7 @@ async def handle(
                         namespaced_tools=namespaced_tools,
                         custom_tool_names=custom_tool_names,
                         custom_call_item_ids=custom_call_item_ids,
+                        custom_call_argument_buffers=custom_call_argument_buffers,
                         rewrite_collaboration=collaboration_compatibility,
                     )
                     rewritten_calls += changed
@@ -2889,6 +2956,7 @@ async def handle(
                         namespaced_tools=namespaced_tools,
                         custom_tool_names=custom_tool_names,
                         custom_call_item_ids=custom_call_item_ids,
+                        custom_call_argument_buffers=custom_call_argument_buffers,
                         rewrite_collaboration=collaboration_compatibility,
                     )
                     rewritten_calls += changed
@@ -2904,6 +2972,7 @@ async def handle(
                     namespaced_tools=namespaced_tools,
                     custom_tool_names=custom_tool_names,
                     custom_call_item_ids=custom_call_item_ids,
+                    custom_call_argument_buffers=custom_call_argument_buffers,
                     rewrite_collaboration=collaboration_compatibility,
                 )
                 rewritten_calls += changed
