@@ -31,6 +31,13 @@ uv sync --locked
   and both protocol ingress processes.
 - `litellm/config.yaml` is used by the conformance test environment only.
 
+The model source intentionally does not set per-model `timeout` or
+`stream_timeout`; the old 900-second and 3600-second route limits are not part
+of the current policy. The runtime template keeps `num_retries: 0` for general
+errors and sets `router_settings.retry_policy.RateLimitErrorRetries: 4` so
+only rate-limit failures are retried. LiteLLM uses an upstream `Retry-After`
+header when applicable and otherwise uses its own bounded backoff.
+
 Generate and validate the runtime file:
 
 ```powershell

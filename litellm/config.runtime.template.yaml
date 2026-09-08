@@ -16,3 +16,5 @@ general_settings:
   cancel_on_disconnect: true
 router_settings:
   num_retries: 0
+  retry_policy:
+    RateLimitErrorRetries: 4

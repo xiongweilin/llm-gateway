@@ -54,6 +54,19 @@ models. The model catalog is derived from the protocol mode in
 The existing lifecycle script filenames are retained for scheduled-task
 compatibility. Their public behavior is protocol-neutral.
 
+## Request retry and timeout boundary
+
+The gateway does not use the previous per-model `timeout` or
+`stream_timeout` values. The upstream model request may therefore use
+LiteLLM's own fallback behavior; the gateway does not define a 900-second or
+3600-second model deadline in the route source.
+
+The runtime router keeps general retries disabled and enables four retries only
+for `RateLimitError`. LiteLLM uses the upstream `Retry-After` response header
+when it is a usable short delay, and falls back to its bounded exponential
+backoff otherwise. 400/401/403, quota/configuration failures, timeouts, and
+other error classes are not enabled by this policy.
+
 ## Local development
 
 ```powershell

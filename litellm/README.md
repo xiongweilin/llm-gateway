@@ -51,6 +51,19 @@ model block by hand.
 The separate `config.yaml` remains the conformance-test configuration. It is
 not the source for the long-running three-port topology.
 
+### Retry and timeout policy
+
+`models.yaml` does not set per-model `timeout` or `stream_timeout`. The
+previous 900-second GPT and 3600-second Muse/Omen limits are therefore not
+declared by this gateway; LiteLLM may still apply its package-level fallback
+where the underlying request path requires one.
+
+The generated runtime template leaves general router retries at zero and
+enables four retries only for `RateLimitError`. LiteLLM uses the upstream
+`Retry-After` header when it contains a usable short delay, otherwise it uses
+its bounded exponential backoff. Other error classes remain outside this
+retry policy.
+
 ## Model routing
 
 Each runtime model declares one protocol mode:
