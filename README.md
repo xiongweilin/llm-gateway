@@ -73,17 +73,19 @@ The Muse Spark 1.3 Contributor route uses a gateway-side precompaction guard on
 4100 only. When the estimated Muse request reaches the configured precompaction
 budget, 4100 generates a bounded checkpoint, keeps the newest tool-call/result
 history, rotates to a fresh upstream `x-opencode-session` epoch, and forwards a
-normal Responses request to 4101. The Codex thread remains unchanged; the
-provider session is the state boundary that is replaced after the first
-successful compaction. During a streamed checkpoint operation it sends SSE
-comments as connection heartbeats; it does not emit a visible waiting message,
-a fake tool call, or a remote compaction output item.
+normal Responses request to 4101. During a streamed checkpoint operation it
+sends SSE comments as connection heartbeats, so the client remains connected
+while the checkpoint is generated.
 
-If Codex still sends a `compaction_trigger` from an existing or stale session,
-4100 removes that marker before the Muse precompaction decision and never
-forwards it to LiteLLM or the provider. Repeated requests reuse the rotated
-provider epoch and the existing checkpoint state instead of opening another
-provider session for the same compacted prefix.
+If Codex sends a `compaction_trigger`, 4100 handles the protocol boundary
+locally: it runs the same Muse checkpoint path and returns a Responses
+`response.compaction` containing the retained user messages followed by exactly
+one gateway compaction item. The trigger and compaction item are never sent to
+OpenCode Go. On the next Muse request, 4100 resolves its opaque checkpoint
+handle back into a normal historical message before forwarding the request, so
+Codex can discard the old transcript while the provider receives only input
+item types it supports. Repeated requests reuse the existing checkpoint state
+and rotated provider epoch for the same compacted prefix.
 
 The default Muse precompaction budget is `900000` estimated tokens, below the
 current Codex effective threshold of about `950000`. It can be tuned with

@@ -19,6 +19,7 @@ import logging
 import math
 import os
 import sys
+import time
 import uuid
 from collections import Counter, OrderedDict
 from collections.abc import Mapping
@@ -102,6 +103,7 @@ MUSE_COMPACTION_TIMEOUT_SECONDS = _env_int(
 MUSE_COMPACTION_HEARTBEAT_DELAY_SECONDS = 1.0
 MUSE_COMPACTION_HEARTBEAT_INTERVAL_SECONDS = 10.0
 MUSE_COMPACTION_STATE_LIMIT = 64
+MUSE_COMPACTION_TOKEN_LIMIT = 64
 _OPENCODE_PROCESS_SESSION = f"codex-{uuid.uuid4().hex}"
 PLAINTEXT_COLLABORATION_TOOLS = {"spawn_agent", "send_message", "followup_task"}
 COLLABORATION_TOOLS = PLAINTEXT_COLLABORATION_TOOLS | {
@@ -134,6 +136,7 @@ class MuseCompactionState:
 
 _MUSE_COMPACTION_STATES: OrderedDict[str, MuseCompactionState] = OrderedDict()
 _MUSE_COMPACTION_LOCKS: dict[str, asyncio.Lock] = {}
+_MUSE_COMPACTION_TOKENS: OrderedDict[str, str] = OrderedDict()
 
 
 def _header_value(headers: Mapping[str, str], name: str) -> str | None:
@@ -751,6 +754,26 @@ def _remember_compaction_state(key: str, state: MuseCompactionState) -> None:
         _MUSE_COMPACTION_STATES.popitem(last=False)
 
 
+def _remember_muse_compaction_token(session: str, state: MuseCompactionState) -> str:
+    """Create an opaque checkpoint handle that Codex can persist and replay.
+
+    The Responses compaction item exposes an ``encrypted_content`` field.  The
+    gateway cannot mint a provider-owned encrypted payload, so it stores the
+    checkpoint in its bounded in-process state and puts only an opaque handle
+    in that field.  A later request can turn the handle back into a normal
+    user message before it reaches OpenCode Go.
+    """
+    digest = hashlib.sha256(
+        f"muse-compaction:{session}:{state.head_hash}:{state.compacted_prefix_hash}".encode()
+    ).hexdigest()
+    token = f"gateway-muse-{digest[:32]}"
+    _MUSE_COMPACTION_TOKENS[token] = state.summary
+    _MUSE_COMPACTION_TOKENS.move_to_end(token)
+    while len(_MUSE_COMPACTION_TOKENS) > MUSE_COMPACTION_TOKEN_LIMIT:
+        _MUSE_COMPACTION_TOKENS.popitem(last=False)
+    return token
+
+
 def _compaction_lock(key: str) -> asyncio.Lock:
     lock = _MUSE_COMPACTION_LOCKS.get(key)
     if lock is None:
@@ -774,6 +797,86 @@ def _compaction_message(summary: str) -> dict:
             }
         ],
     }
+
+
+def _muse_compaction_state_for_body(
+    body: bytes,
+    session: str,
+) -> MuseCompactionState | None:
+    try:
+        obj = json.loads(body)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(obj, dict):
+        return None
+    items = obj.get("input")
+    if not isinstance(items, list) or not items:
+        return None
+    key = _compaction_state_key(session, items)
+    state = _MUSE_COMPACTION_STATES.get(key)
+    if state is None or not _state_matches(state, items):
+        return None
+    _MUSE_COMPACTION_STATES.move_to_end(key)
+    return state
+
+
+def _has_compaction_trigger(request: Mapping) -> bool:
+    items = request.get("input") if isinstance(request, Mapping) else None
+    return isinstance(items, list) and any(
+        isinstance(item, dict) and item.get("type") == "compaction_trigger"
+        for item in items
+    )
+
+
+def normalize_muse_compaction_items(body: bytes) -> bytes:
+    """Restore gateway checkpoints before sending a request to Muse.
+
+    Codex persists the Responses ``compaction`` item in the next turn.  That
+    item is not accepted by Console Go, so resolve known gateway handles to a
+    normal checkpoint message and never forward the protocol-only item.
+    """
+    try:
+        obj = json.loads(body)
+    except (TypeError, ValueError):
+        return body
+
+    if not isinstance(obj, dict):
+        return body
+    if obj.get("model") != MUSE_COMPACTION_MODEL:
+        return body
+    items = obj.get("input")
+    if not isinstance(items, list):
+        return body
+
+    normalized = []
+    converted = 0
+    unavailable = 0
+    for item in items:
+        if not isinstance(item, dict) or item.get("type") != "compaction":
+            normalized.append(item)
+            continue
+        token = item.get("encrypted_content")
+        summary = _MUSE_COMPACTION_TOKENS.get(token) if isinstance(token, str) else None
+        if summary is None:
+            unavailable += 1
+            summary = (
+                "[The gateway checkpoint is unavailable after a proxy restart. "
+                "Use the remaining conversation history and continue the task.]"
+            )
+        else:
+            _MUSE_COMPACTION_TOKENS.move_to_end(token)
+        normalized.append(_compaction_message(summary))
+        converted += 1
+
+    if not converted:
+        return body
+    obj["input"] = normalized
+    log.info(
+        "Muse compaction item compatibility: converted=%d unavailable=%d",
+        converted,
+        unavailable,
+    )
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
 
 
 def _apply_compaction_state(obj: dict, state: MuseCompactionState) -> dict:
@@ -933,30 +1036,19 @@ async def _generate_muse_checkpoint(
         return summary
 
 
-def muse_needs_precompaction(body: bytes, model: object) -> bool:
-    if model != MUSE_COMPACTION_MODEL:
-        return False
-    try:
-        obj = json.loads(body)
-    except (TypeError, ValueError):
-        return False
-    if not isinstance(obj, dict) or not isinstance(obj.get("input"), list):
-        return False
-    return _json_tokens(obj) > MUSE_PRECOMPACTION_TOKEN_BUDGET
-
-
 async def maybe_precompact_muse(
     body: bytes,
     opencode_session: str,
     session: aiohttp.ClientSession,
     backend: str,
     headers: Mapping[str, str],
+    force: bool = False,
 ) -> tuple[bytes, bool, str]:
     """Compact only Muse before its request reaches the provider.
 
-    The returned body remains a normal Responses request. Codex never sees a
-    compaction output item, so it cannot enter the incompatible remote
-    compaction protocol for this model.
+    ``force`` is used when Codex explicitly requests a compaction checkpoint.
+    Normal requests still use the lower gateway budget to avoid reaching that
+    protocol boundary in the first place.
     """
     try:
         obj = json.loads(body)
@@ -977,7 +1069,7 @@ async def maybe_precompact_muse(
 
         # A concurrent request may have populated the state while this one
         # waited for the per-session lock, so re-check the current body.
-        if _json_tokens(obj) <= MUSE_PRECOMPACTION_TOKEN_BUDGET:
+        if _json_tokens(obj) <= MUSE_PRECOMPACTION_TOKEN_BUDGET and not force:
             return body, False, effective_session
 
         history = items[1:]
@@ -1064,6 +1156,103 @@ async def maybe_precompact_muse(
         if state is None:
             log.info("Muse provider session epoch created after precompaction")
         return transformed_body, True, new_state.provider_session
+
+
+def _muse_compaction_user_messages(items: list) -> list[dict]:
+    output = []
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") != "message" or item.get("role") != "user":
+            continue
+        message = dict(item)
+        message["type"] = "message"
+        message["role"] = "user"
+        message.setdefault("status", "completed")
+        if not isinstance(message.get("id"), str) or not message["id"]:
+            digest = hashlib.sha256(
+                json.dumps(item, ensure_ascii=False, sort_keys=True).encode()
+            ).hexdigest()
+            message["id"] = f"msg_gateway_{index}_{digest[:16]}"
+        output.append(message)
+    return output
+
+
+def _build_muse_compaction_response(
+    body: bytes,
+    state: MuseCompactionState,
+    session: str,
+    model: str = MUSE_COMPACTION_MODEL,
+) -> dict:
+    try:
+        obj = json.loads(body)
+    except (TypeError, ValueError):
+        obj = {}
+    items = obj.get("input") if isinstance(obj, dict) else []
+    if not isinstance(items, list):
+        items = []
+
+    token = _remember_muse_compaction_token(session, state)
+    token_digest = hashlib.sha256(token.encode()).hexdigest()
+    input_tokens = _json_tokens(obj)
+    output_tokens = _json_tokens(state.summary)
+    output = _muse_compaction_user_messages(items)
+    output.append(
+        {
+            "id": f"cmp_gateway_{token_digest[:24]}",
+            "type": "compaction",
+            "encrypted_content": token,
+        }
+    )
+    return {
+        "id": f"resp_compaction_gateway_{token_digest[:24]}",
+        "object": "response.compaction",
+        "created_at": int(time.time()),
+        "status": "completed",
+        "model": model,
+        "output": output,
+        "usage": {
+            "input_tokens": input_tokens,
+            "input_tokens_details": {
+                "cached_tokens": 0,
+                "cache_write_tokens": 0,
+            },
+            "output_tokens": output_tokens,
+            "output_tokens_details": {"reasoning_tokens": 0},
+            "total_tokens": input_tokens + output_tokens,
+        },
+    }
+
+
+def _responses_sse_frame(event_type: str, payload: dict) -> bytes:
+    event = dict(payload)
+    event.setdefault("type", event_type)
+    encoded = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+    return f"event: {event_type}\ndata: {encoded}\n\n".encode()
+
+
+def _muse_compaction_response_to_sse(response: dict) -> bytes:
+    created = dict(response)
+    created["status"] = "in_progress"
+    frames = [
+        _responses_sse_frame("response.created", {"response": created}),
+        _responses_sse_frame("response.in_progress", {"response": created}),
+    ]
+    for output_index, item in enumerate(response.get("output", [])):
+        frames.append(
+            _responses_sse_frame(
+                "response.output_item.added",
+                {"output_index": output_index, "item": item},
+            )
+        )
+        frames.append(
+            _responses_sse_frame(
+                "response.output_item.done",
+                {"output_index": output_index, "item": item},
+            )
+        )
+    frames.append(_responses_sse_frame("response.completed", {"response": response}))
+    return b"".join(frames)
 
 
 async def _compaction_keepalive(response: aiohttp.web.StreamResponse) -> None:
@@ -1217,9 +1406,9 @@ def normalize_opencode_compaction_triggers(body: bytes) -> bytes:
 
     ``compaction_trigger`` is an internal Codex Responses item.  It is useful
     to Codex's own context-management path, but Console Go validates the
-    public input item union and rejects it.  Keep the item untouched for the
-    ChatGPT-backed models and remove it only before an OpenCode Go request is
-    sent upstream.
+    public input item union and rejects it.  Muse compaction requests are
+    handled before the upstream call; this sanitizer remains the provider
+    boundary fallback for other OpenCode Go routes.
     """
     try:
         obj = json.loads(body)
@@ -2273,6 +2462,9 @@ async def handle(
     request_obj: dict = {}
     collaboration_compatibility = False
     bridged_responses_to_chat = False
+    codex_compaction_requested = False
+    compaction_source_body: bytes | None = None
+    compaction_source_session: str | None = None
     upstream_path = req.path
     tool_name_map: dict[str, tuple[str, str]] = {}
     prepared_stream_response: aiohttp.web.StreamResponse | None = None
@@ -2311,6 +2503,9 @@ async def handle(
             before = request_summary(dec)
             log.info("request summary %s", json.dumps(before, sort_keys=True))
             dec = normalize_scalar_responses_input(dec)
+            if is_muse_model(model):
+                codex_compaction_requested = _has_compaction_trigger(request_obj)
+                dec = normalize_muse_compaction_items(dec)
             if is_opencode_model(model):
                 dec = normalize_opencode_compaction_triggers(dec)
             try:
@@ -2346,13 +2541,18 @@ async def handle(
             if normalized.get("input_types") != before.get("input_types"):
                 log.info("request summary after compatibility %s", json.dumps(normalized, sort_keys=True))
             if is_muse_model(model):
+                compaction_source_body = dec
+                compaction_source_session = (
+                    opencode_session or _OPENCODE_PROCESS_SESSION
+                )
                 compact_task = asyncio.create_task(
                     maybe_precompact_muse(
                         dec,
-                        opencode_session or _OPENCODE_PROCESS_SESSION,
+                        compaction_source_session,
                         session,
                         backend,
                         req.headers,
+                        force=codex_compaction_requested,
                     )
                 )
                 try:
@@ -2383,6 +2583,67 @@ async def handle(
                             }
                         },
                         status=502,
+                    )
+                if codex_compaction_requested:
+                    compaction_state = _muse_compaction_state_for_body(
+                        compaction_source_body or dec,
+                        compaction_source_session or _OPENCODE_PROCESS_SESSION,
+                    )
+                    if compaction_state is None:
+                        message = "Muse gateway could not create a compaction checkpoint"
+                        log.warning(message)
+                        if prepared_stream_response is not None:
+                            return await _finish_prepared_stream_error(
+                                prepared_stream_response,
+                                message,
+                            )
+                        return aiohttp.web.json_response(
+                            {
+                                "error": {
+                                    "type": "server_error",
+                                    "message": message,
+                                }
+                            },
+                            status=502,
+                        )
+                    compaction_response = _build_muse_compaction_response(
+                        compaction_source_body or dec,
+                        compaction_state,
+                        compaction_source_session or _OPENCODE_PROCESS_SESSION,
+                        model if isinstance(model, str) else MUSE_COMPACTION_MODEL,
+                    )
+                    log.info(
+                        "Muse compaction response generated output_items=%d compaction_items=%d",
+                        len(compaction_response["output"]),
+                        sum(
+                            1
+                            for item in compaction_response["output"]
+                            if isinstance(item, dict) and item.get("type") == "compaction"
+                        ),
+                    )
+                    if caller_stream:
+                        sse_body = _muse_compaction_response_to_sse(compaction_response)
+                        if prepared_stream_response is not None:
+                            try:
+                                await prepared_stream_response.write(sse_body)
+                                await prepared_stream_response.write_eof()
+                            except (ConnectionResetError, RuntimeError):
+                                pass
+                            return prepared_stream_response
+                        return aiohttp.web.Response(
+                            status=200,
+                            body=sse_body,
+                            headers={"Cache-Control": "no-cache"},
+                            content_type="text/event-stream",
+                        )
+                    return aiohttp.web.Response(
+                        status=200,
+                        body=json.dumps(
+                            compaction_response,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ).encode(),
+                        content_type="application/json",
                     )
             before_len = len(dec)
             dec = truncate_input(dec)

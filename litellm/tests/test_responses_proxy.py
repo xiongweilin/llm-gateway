@@ -161,7 +161,96 @@ def test_compaction_trigger_normalization_remains_for_opencode() -> None:
     assert proxy.normalize_opencode_compaction_triggers(raw) is raw
 
 
-def test_muse_precompaction_is_scoped_and_handles_codex_trigger() -> None:
+def test_muse_compaction_item_is_restored_before_provider_request() -> None:
+    request = {
+        "model": "opencode-go/muse-spark-1.3-contributor",
+        "input": [
+            {"type": "message", "role": "user", "content": []},
+            {
+                "type": "compaction",
+                "id": "cmp_1",
+                "encrypted_content": "gateway-muse-test-token",
+            },
+        ],
+    }
+    old_tokens = proxy._MUSE_COMPACTION_TOKENS.copy()
+    try:
+        proxy._MUSE_COMPACTION_TOKENS.clear()
+        proxy._MUSE_COMPACTION_TOKENS["gateway-muse-test-token"] = "Keep the active task."
+        normalized = json.loads(
+            proxy.normalize_muse_compaction_items(json.dumps(request).encode())
+        )
+        assert [item["type"] for item in normalized["input"]] == [
+            "message",
+            "message",
+        ]
+        assert "Gateway-generated historical checkpoint" in normalized["input"][1]["content"][0]["text"]
+
+        request["model"] = "opencode-go/omen-alpha"
+        raw = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode()
+        assert proxy.normalize_muse_compaction_items(raw) is raw
+    finally:
+        proxy._MUSE_COMPACTION_TOKENS.clear()
+        proxy._MUSE_COMPACTION_TOKENS.update(old_tokens)
+
+
+def test_muse_compaction_response_contains_one_protocol_item() -> None:
+    request = {
+        "model": "opencode-go/muse-spark-1.3-contributor",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "objective"}],
+            },
+            {"type": "message", "role": "assistant", "content": []},
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "continue"}],
+            },
+        ],
+    }
+    state = proxy.MuseCompactionState(
+        summary="Objective: continue the active task.",
+        compacted_prefix_count=1,
+        compacted_prefix_hash="prefix-hash",
+        head_hash="head-hash",
+        provider_session="provider-session",
+    )
+    old_tokens = proxy._MUSE_COMPACTION_TOKENS.copy()
+    try:
+        proxy._MUSE_COMPACTION_TOKENS.clear()
+        response = proxy._build_muse_compaction_response(
+            json.dumps(request, separators=(",", ":")).encode(),
+            state,
+            "codex-session",
+        )
+        assert response["object"] == "response.compaction"
+        assert response["output"][-1]["type"] == "compaction"
+        assert sum(item["type"] == "compaction" for item in response["output"]) == 1
+        assert all(item["role"] == "user" for item in response["output"][:-1])
+        assert response["usage"]["total_tokens"] == (
+            response["usage"]["input_tokens"] + response["usage"]["output_tokens"]
+        )
+
+        wire = proxy._muse_compaction_response_to_sse(response)
+        events = [
+            json.loads(line[6:])
+            for line in wire.splitlines()
+            if line.startswith(b"data: ")
+        ]
+        completed = next(event for event in events if event["type"] == "response.completed")
+        assert sum(
+            item["type"] == "compaction"
+            for item in completed["response"]["output"]
+        ) == 1
+    finally:
+        proxy._MUSE_COMPACTION_TOKENS.clear()
+        proxy._MUSE_COMPACTION_TOKENS.update(old_tokens)
+
+
+def test_muse_compaction_trigger_detection_is_stable() -> None:
     request = {
         "model": "opencode-go/muse-spark-1.3-contributor",
         "input": [
@@ -170,23 +259,9 @@ def test_muse_precompaction_is_scoped_and_handles_codex_trigger() -> None:
             {"type": "message", "role": "user", "content": []},
         ],
     }
-    raw = json.dumps(request, separators=(",", ":")).encode()
-    old_budget = proxy.MUSE_PRECOMPACTION_TOKEN_BUDGET
-    try:
-        proxy.MUSE_PRECOMPACTION_TOKEN_BUDGET = 1
-        assert proxy.muse_needs_precompaction(
-            raw, "opencode-go/muse-spark-1.3-contributor"
-        )
-        assert not proxy.muse_needs_precompaction(raw, "opencode-go/omen-alpha")
-        assert not proxy.muse_needs_precompaction(raw, "gpt-5.6-luna")
-
-        request["input"].insert(1, {"type": "compaction_trigger", "id": "c1"})
-        triggered = json.dumps(request, separators=(",", ":")).encode()
-        assert proxy.muse_needs_precompaction(
-            triggered, "opencode-go/muse-spark-1.3-contributor"
-        )
-    finally:
-        proxy.MUSE_PRECOMPACTION_TOKEN_BUDGET = old_budget
+    assert not proxy._has_compaction_trigger(request)
+    request["input"].insert(1, {"type": "compaction_trigger", "id": "c1"})
+    assert proxy._has_compaction_trigger(request)
 
 
 def test_muse_precompaction_rewrites_history_and_reuses_state() -> None:
