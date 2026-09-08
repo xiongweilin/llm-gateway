@@ -223,7 +223,7 @@ def test_muse_precompaction_rewrites_history_and_reuses_state() -> None:
         proxy._MUSE_COMPACTION_LOCKS.clear()
         proxy._generate_muse_checkpoint = fake_checkpoint
 
-        compacted, changed = asyncio.run(
+        compacted, changed, compacted_session = asyncio.run(
             proxy.maybe_precompact_muse(
                 raw,
                 "codex-test-session",
@@ -235,11 +235,12 @@ def test_muse_precompaction_rewrites_history_and_reuses_state() -> None:
         compacted_obj = json.loads(compacted)
         assert changed
         assert len(calls) == 1
+        assert compacted_session != "codex-test-session"
         assert "Gateway-generated historical checkpoint" in compacted_obj["input"][1]["content"][0]["text"]
         assert compacted_obj["input"][0] == request["input"][0]
         assert compacted_obj["input"][-1] == request["input"][-1]
 
-        compacted_again, changed_again = asyncio.run(
+        compacted_again, changed_again, compacted_session_again = asyncio.run(
             proxy.maybe_precompact_muse(
                 raw,
                 "codex-test-session",
@@ -250,6 +251,7 @@ def test_muse_precompaction_rewrites_history_and_reuses_state() -> None:
         )
         assert changed_again
         assert compacted_again == compacted
+        assert compacted_session_again == compacted_session
         assert len(calls) == 1
     finally:
         proxy._generate_muse_checkpoint = original_generator
@@ -263,12 +265,13 @@ def test_muse_precompaction_rewrites_history_and_reuses_state() -> None:
 
 def test_muse_precompaction_waiter_unwraps_body() -> None:
     async def run_waiter():
-        task = asyncio.create_task(asyncio.sleep(0, result=(b"compacted", True)))
+        task = asyncio.create_task(asyncio.sleep(0, result=(b"compacted", True, "session-2")))
         return await proxy._await_muse_precompaction(task, None, False)
 
-    body, prepared_response = asyncio.run(run_waiter())
+    body, prepared_response, provider_session = asyncio.run(run_waiter())
     assert body == b"compacted"
     assert prepared_response is None
+    assert provider_session == "session-2"
 
 
 def test_additional_tools_are_lifted_for_opencode() -> None:
@@ -976,3 +979,23 @@ def test_opencode_session_is_injected_without_touching_gpt_requests() -> None:
     )
     assert json.loads(unchanged) == gpt
     assert gpt_session is None
+
+
+def test_set_opencode_session_replaces_embedded_epoch_without_touching_gpt() -> None:
+    muse = {
+        "model": "opencode-go/muse-spark-1.3-contributor",
+        "extra_headers": {
+            "X-OpenCode-Session": "old-session",
+            "x-client-header": "keep",
+        },
+    }
+    rotated = json.loads(proxy.set_opencode_session(json.dumps(muse).encode(), "new-session"))
+    assert rotated["extra_headers"] == {
+        "x-client-header": "keep",
+        "x-opencode-session": "new-session",
+    }
+
+    gpt = {"model": "gpt-5.6-luna", "extra_headers": {"x-client": "keep"}}
+    assert proxy.set_opencode_session(json.dumps(gpt).encode(), "must-not-apply") == json.dumps(
+        gpt
+    ).encode()

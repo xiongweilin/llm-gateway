@@ -129,6 +129,7 @@ class MuseCompactionState:
     compacted_prefix_count: int
     compacted_prefix_hash: str
     head_hash: str
+    provider_session: str
 
 
 _MUSE_COMPACTION_STATES: OrderedDict[str, MuseCompactionState] = OrderedDict()
@@ -173,6 +174,22 @@ def _find_stable_session_value(value) -> str | None:
 def _opaque_opencode_session(source: str) -> str:
     """Convert a native Codex identifier into an opaque stable provider ID."""
     digest = hashlib.sha256(f"opencode-session:{source}".encode()).hexdigest()
+    return f"codex-{digest[:32]}"
+
+
+def _rotated_muse_provider_session(
+    source_session: str,
+    head_hash: str,
+    compacted_prefix_hash: str,
+) -> str:
+    """Create a deterministic provider session for one gateway compaction epoch."""
+    digest = hashlib.sha256(
+        (
+            "muse-session-epoch:"
+            f"{_OPENCODE_PROCESS_SESSION}:{source_session}:"
+            f"{head_hash}:{compacted_prefix_hash}"
+        ).encode()
+    ).hexdigest()
     return f"codex-{digest[:32]}"
 
 
@@ -272,6 +289,28 @@ def ensure_opencode_session(
     extra_headers[OPENCODE_SESSION_HEADER] = session
     obj["extra_headers"] = extra_headers
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode(), session
+
+
+def set_opencode_session(body: bytes, session: str | None) -> bytes:
+    """Replace the provider session embedded in an OpenCode model request."""
+    if not session:
+        return body
+    try:
+        obj = json.loads(body)
+    except Exception:
+        return body
+    if not isinstance(obj, dict) or not is_opencode_model(obj.get("model")):
+        return body
+
+    extra_headers = obj.get("extra_headers")
+    if not isinstance(extra_headers, dict):
+        extra_headers = {}
+    for key in list(extra_headers):
+        if isinstance(key, str) and key.lower() == OPENCODE_SESSION_HEADER:
+            del extra_headers[key]
+    extra_headers[OPENCODE_SESSION_HEADER] = session
+    obj["extra_headers"] = extra_headers
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
 
 
 MUSE_AUTONOMOUS_INSTRUCTIONS = (
@@ -912,7 +951,7 @@ async def maybe_precompact_muse(
     session: aiohttp.ClientSession,
     backend: str,
     headers: Mapping[str, str],
-) -> tuple[bytes, bool]:
+) -> tuple[bytes, bool, str]:
     """Compact only Muse before its request reaches the provider.
 
     The returned body remains a normal Responses request. Codex never sees a
@@ -922,21 +961,26 @@ async def maybe_precompact_muse(
     try:
         obj = json.loads(body)
     except (TypeError, ValueError):
-        return body, False
+        return body, False, opencode_session
     items = obj.get("input")
     if not isinstance(items, list) or len(items) < 3:
-        return body, False
+        return body, False, opencode_session
 
     session_key = _compaction_state_key(opencode_session, items)
     lock = _compaction_lock(session_key)
     async with lock:
+        state = _MUSE_COMPACTION_STATES.get(session_key)
+        if state is not None and not _state_matches(state, items):
+            state = None
+
+        effective_session = state.provider_session if state is not None else opencode_session
+
         # A concurrent request may have populated the state while this one
         # waited for the per-session lock, so re-check the current body.
         if _json_tokens(obj) <= MUSE_PRECOMPACTION_TOKEN_BUDGET:
-            return body, False
+            return body, False, effective_session
 
         history = items[1:]
-        state = _MUSE_COMPACTION_STATES.get(session_key)
         fixed = dict(obj)
         fixed["input"] = []
         fixed_tokens = _json_tokens(fixed)
@@ -953,7 +997,7 @@ async def maybe_precompact_muse(
             log.warning(
                 "Muse precompaction skipped: fixed request envelope exceeds budget"
             )
-            return body, False
+            return body, False, effective_session
 
         if state is not None and _state_matches(state, items):
             if target_prefix_count <= state.compacted_prefix_count:
@@ -961,6 +1005,7 @@ async def maybe_precompact_muse(
                 return (
                     json.dumps(transformed, ensure_ascii=False, separators=(",", ":")).encode(),
                     True,
+                    state.provider_session,
                 )
             source_items = history[state.compacted_prefix_count : target_prefix_count]
             existing_summary = state.summary
@@ -991,6 +1036,15 @@ async def maybe_precompact_muse(
             compacted_prefix_count=target_prefix_count,
             compacted_prefix_hash=_history_hash(history[:target_prefix_count]),
             head_hash=_history_hash(items[:1]),
+            provider_session=(
+                state.provider_session
+                if state is not None
+                else _rotated_muse_provider_session(
+                    opencode_session,
+                    _history_hash(items[:1]),
+                    _history_hash(history[:target_prefix_count]),
+                )
+            ),
         )
         _remember_compaction_state(session_key, new_state)
         transformed = _apply_compaction_state(obj, new_state)
@@ -1007,7 +1061,9 @@ async def maybe_precompact_muse(
             _json_tokens(obj),
             _json_tokens(transformed),
         )
-        return transformed_body, True
+        if state is None:
+            log.info("Muse provider session epoch created after precompaction")
+        return transformed_body, True, new_state.provider_session
 
 
 async def _compaction_keepalive(response: aiohttp.web.StreamResponse) -> None:
@@ -1023,10 +1079,10 @@ async def _await_muse_precompaction(
     task: asyncio.Task,
     req: aiohttp.web.Request,
     caller_stream: bool,
-) -> tuple[bytes, aiohttp.web.StreamResponse | None]:
+) -> tuple[bytes, aiohttp.web.StreamResponse | None, str]:
     if not caller_stream:
-        compacted_body, _ = await task
-        return compacted_body, None
+        compacted_body, _, provider_session = await task
+        return compacted_body, None, provider_session
 
     prepared_response = None
     heartbeat_task = None
@@ -1036,8 +1092,8 @@ async def _await_muse_precompaction(
                 asyncio.shield(task),
                 timeout=MUSE_COMPACTION_HEARTBEAT_DELAY_SECONDS,
             )
-            compacted_body, _ = result
-            return compacted_body, None
+            compacted_body, _, provider_session = result
+            return compacted_body, None, provider_session
         except asyncio.TimeoutError:
             prepared_response = aiohttp.web.StreamResponse(status=200)
             prepared_response.headers["Content-Type"] = "text/event-stream"
@@ -1046,8 +1102,8 @@ async def _await_muse_precompaction(
             await prepared_response.prepare(req)
             await prepared_response.write(b": muse-compaction-start\n\n")
             heartbeat_task = asyncio.create_task(_compaction_keepalive(prepared_response))
-            compacted_body, _ = await task
-            return compacted_body, prepared_response
+            compacted_body, _, provider_session = await task
+            return compacted_body, prepared_response, provider_session
     finally:
         if heartbeat_task is not None:
             heartbeat_task.cancel()
@@ -2232,7 +2288,7 @@ async def handle(
             normalized = request_summary(dec)
             if normalized.get("input_types") != before.get("input_types"):
                 log.info("request summary after compatibility %s", json.dumps(normalized, sort_keys=True))
-            if muse_needs_precompaction(dec, model):
+            if is_muse_model(model):
                 compact_task = asyncio.create_task(
                     maybe_precompact_muse(
                         dec,
@@ -2243,11 +2299,16 @@ async def handle(
                     )
                 )
                 try:
-                    dec, prepared_stream_response = await _await_muse_precompaction(
+                    (
+                        dec,
+                        prepared_stream_response,
+                        opencode_session,
+                    ) = await _await_muse_precompaction(
                         compact_task,
                         req,
                         caller_stream,
                     )
+                    dec = set_opencode_session(dec, opencode_session)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:  # noqa: BLE001
