@@ -323,6 +323,70 @@ def test_additional_tools_are_unchanged_for_chatgpt() -> None:
     assert proxy.normalize_opencode_additional_tools(raw) is raw
 
 
+def test_search_content_types_are_kept_only_for_preview_tools() -> None:
+    request = {
+        "model": "opencode-go/muse-spark-1.3-contributor",
+        "tools": [
+            {
+                "type": "web_search",
+                "search_content_types": ["text", "image"],
+            },
+            {
+                "type": "web_search_preview",
+                "search_content_types": ["text"],
+            },
+            {
+                "type": "namespace",
+                "name": "demo",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "lookup",
+                        "search_content_types": ["text"],
+                    },
+                    {
+                        "type": "web_search_preview",
+                        "search_content_types": ["image"],
+                    },
+                ],
+            },
+        ],
+        "input": [
+            {
+                "type": "additional_tools",
+                "tools": [
+                    {
+                        "type": "web_search",
+                        "search_content_types": ["text"],
+                    }
+                ],
+            }
+        ],
+    }
+
+    normalized = json.loads(
+        proxy.normalize_opencode_search_tool_fields(json.dumps(request).encode())
+    )
+
+    assert "search_content_types" not in normalized["tools"][0]
+    assert normalized["tools"][1]["search_content_types"] == ["text"]
+    assert "search_content_types" not in normalized["tools"][2]["tools"][0]
+    assert normalized["tools"][2]["tools"][1]["search_content_types"] == ["image"]
+    assert "search_content_types" not in normalized["input"][0]["tools"][0]
+
+
+def test_search_content_types_are_unchanged_for_chatgpt() -> None:
+    request = {
+        "model": "gpt-5.6-luna",
+        "tools": [
+            {"type": "web_search", "search_content_types": ["text"]},
+        ],
+    }
+    raw = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode()
+
+    assert proxy.normalize_opencode_search_tool_fields(raw) is raw
+
+
 def test_opencode_tool_descriptions_are_nonempty_and_scoped() -> None:
     request = {
         "model": "opencode-go/muse-spark-1.3-contributor",

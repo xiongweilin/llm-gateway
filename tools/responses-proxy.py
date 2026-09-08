@@ -1315,6 +1315,62 @@ def normalize_opencode_additional_tools(body: bytes) -> bytes:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
 
 
+def normalize_opencode_search_tool_fields(body: bytes) -> bytes:
+    """Keep ``search_content_types`` only on supported search declarations.
+
+    Codex may attach ``search_content_types`` to a ``web_search`` declaration,
+    while OpenCode Go accepts that field only for ``web_search_preview``.
+    Remove the incompatible direct field from OpenCode Go tool declarations,
+    including nested namespaces and any not-yet-lifted ``additional_tools``.
+    Other model routes remain unchanged.
+    """
+    try:
+        obj = json.loads(body)
+    except Exception:
+        return body
+
+    model = obj.get("model")
+    if not isinstance(model, str) or not model.startswith("opencode-go/"):
+        return body
+
+    removed = 0
+
+    def visit_tools(value) -> None:
+        nonlocal removed
+        if isinstance(value, list):
+            for child in value:
+                visit_tools(child)
+            return
+        if not isinstance(value, dict):
+            return
+
+        if (
+            "search_content_types" in value
+            and value.get("type") != "web_search_preview"
+        ):
+            del value["search_content_types"]
+            removed += 1
+
+        nested_tools = value.get("tools")
+        if isinstance(nested_tools, list):
+            visit_tools(nested_tools)
+
+    visit_tools(obj.get("tools"))
+    input_items = obj.get("input")
+    if isinstance(input_items, list):
+        for item in input_items:
+            if isinstance(item, dict) and item.get("type") == "additional_tools":
+                visit_tools(item.get("tools"))
+
+    if not removed:
+        return body
+    log.info(
+        "OpenCode Go search tool compatibility: removed_search_content_types=%d",
+        removed,
+    )
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
+
+
 def _custom_tool_parameters() -> dict:
     """Expose a Responses custom tool to OpenCode as one string property."""
     return {
@@ -2281,6 +2337,7 @@ async def handle(
             # ``request_obj`` still describes the original request and can
             # otherwise make the provider-specific sanitizers skip the tools.
             if is_opencode_model(model):
+                dec = normalize_opencode_search_tool_fields(dec)
                 dec = normalize_opencode_tool_descriptions(dec)
                 dec = normalize_tool_schemas(dec)
             dec, opencode_session = ensure_opencode_session(dec, req.headers)
