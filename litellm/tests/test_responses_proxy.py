@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import json
 from pathlib import Path
@@ -126,9 +127,9 @@ def test_agent_message_conversion_is_scoped_to_opencode_plaintext() -> None:
     assert json.loads(proxy.normalize_agent_messages(json.dumps(chatgpt).encode())) == chatgpt
 
 
-def test_compaction_trigger_is_removed_only_for_opencode() -> None:
+def test_compaction_trigger_normalization_remains_for_non_muse_opencode() -> None:
     request = {
-        "model": "opencode-go/muse-spark-1.3-contributor",
+        "model": "opencode-go/omen-alpha",
         "input": [
             {"type": "message", "role": "user", "content": []},
             {"type": "compaction_trigger", "id": "compact_1"},
@@ -147,6 +148,116 @@ def test_compaction_trigger_is_removed_only_for_opencode() -> None:
     request["model"] = "gpt-5.6-luna"
     raw = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode()
     assert proxy.normalize_opencode_compaction_triggers(raw) is raw
+
+
+def test_muse_precompaction_is_scoped_and_skips_codex_trigger() -> None:
+    request = {
+        "model": "opencode-go/muse-spark-1.3-contributor",
+        "input": [
+            {"type": "message", "role": "user", "content": []},
+            {"type": "message", "role": "assistant", "content": []},
+            {"type": "message", "role": "user", "content": []},
+        ],
+    }
+    raw = json.dumps(request, separators=(",", ":")).encode()
+    old_budget = proxy.MUSE_PRECOMPACTION_TOKEN_BUDGET
+    try:
+        proxy.MUSE_PRECOMPACTION_TOKEN_BUDGET = 1
+        assert proxy.muse_needs_precompaction(
+            raw, "opencode-go/muse-spark-1.3-contributor"
+        )
+        assert not proxy.muse_needs_precompaction(raw, "opencode-go/omen-alpha")
+        assert not proxy.muse_needs_precompaction(raw, "gpt-5.6-luna")
+
+        request["input"].insert(1, {"type": "compaction_trigger", "id": "c1"})
+        triggered = json.dumps(request, separators=(",", ":")).encode()
+        assert not proxy.muse_needs_precompaction(
+            triggered, "opencode-go/muse-spark-1.3-contributor"
+        )
+    finally:
+        proxy.MUSE_PRECOMPACTION_TOKEN_BUDGET = old_budget
+
+
+def test_muse_precompaction_rewrites_history_and_reuses_state() -> None:
+    request = {
+        "model": "opencode-go/muse-spark-1.3-contributor",
+        "input": [
+            {"type": "message", "role": "user", "content": "objective"},
+            *[
+                {
+                    "type": "message",
+                    "role": "assistant" if index % 2 else "user",
+                    "content": f"turn-{index}-" + ("x" * 20_000),
+                }
+                for index in range(6)
+            ],
+        ],
+    }
+    raw = json.dumps(request, separators=(",", ":")).encode()
+    old_budget = proxy.MUSE_PRECOMPACTION_TOKEN_BUDGET
+    old_keep = proxy.MUSE_COMPACTION_KEEP_TOKEN_BUDGET
+    old_states = proxy._MUSE_COMPACTION_STATES.copy()
+    old_locks = proxy._MUSE_COMPACTION_LOCKS.copy()
+    calls = []
+
+    async def fake_checkpoint(*args, **kwargs):
+        calls.append((args, kwargs))
+        return "## Objective\nKeep working on the requested task."
+
+    original_generator = proxy._generate_muse_checkpoint
+    try:
+        proxy.MUSE_PRECOMPACTION_TOKEN_BUDGET = 30_000
+        proxy.MUSE_COMPACTION_KEEP_TOKEN_BUDGET = 4_000
+        proxy._MUSE_COMPACTION_STATES.clear()
+        proxy._MUSE_COMPACTION_LOCKS.clear()
+        proxy._generate_muse_checkpoint = fake_checkpoint
+
+        compacted, changed = asyncio.run(
+            proxy.maybe_precompact_muse(
+                raw,
+                "codex-test-session",
+                None,
+                "http://127.0.0.1:4101",
+                {},
+            )
+        )
+        compacted_obj = json.loads(compacted)
+        assert changed
+        assert len(calls) == 1
+        assert "Gateway-generated historical checkpoint" in compacted_obj["input"][1]["content"][0]["text"]
+        assert compacted_obj["input"][0] == request["input"][0]
+        assert compacted_obj["input"][-1] == request["input"][-1]
+
+        compacted_again, changed_again = asyncio.run(
+            proxy.maybe_precompact_muse(
+                raw,
+                "codex-test-session",
+                None,
+                "http://127.0.0.1:4101",
+                {},
+            )
+        )
+        assert changed_again
+        assert compacted_again == compacted
+        assert len(calls) == 1
+    finally:
+        proxy._generate_muse_checkpoint = original_generator
+        proxy.MUSE_PRECOMPACTION_TOKEN_BUDGET = old_budget
+        proxy.MUSE_COMPACTION_KEEP_TOKEN_BUDGET = old_keep
+        proxy._MUSE_COMPACTION_STATES.clear()
+        proxy._MUSE_COMPACTION_STATES.update(old_states)
+        proxy._MUSE_COMPACTION_LOCKS.clear()
+        proxy._MUSE_COMPACTION_LOCKS.update(old_locks)
+
+
+def test_muse_precompaction_waiter_unwraps_body() -> None:
+    async def run_waiter():
+        task = asyncio.create_task(asyncio.sleep(0, result=(b"compacted", True)))
+        return await proxy._await_muse_precompaction(task, None, False)
+
+    body, prepared_response = asyncio.run(run_waiter())
+    assert body == b"compacted"
+    assert prepared_response is None
 
 
 def test_additional_tools_are_lifted_for_opencode() -> None:

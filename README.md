@@ -67,6 +67,28 @@ when it is a usable short delay, and falls back to its bounded exponential
 backoff otherwise. 400/401/403, quota/configuration failures, timeouts, and
 other error classes are not enabled by this policy.
 
+## Muse context handling
+
+The Muse Spark 1.3 Contributor route uses a gateway-side precompaction guard on
+4100 only. When the estimated Muse request reaches the configured precompaction
+budget, 4100 generates a bounded checkpoint, keeps the newest tool-call/result
+history, and forwards a normal Responses request to 4101. During a streamed
+checkpoint operation it sends SSE comments as connection heartbeats; it does
+not emit a visible waiting message, a fake tool call, or a remote compaction
+output item.
+
+The default Muse precompaction budget is `900000` estimated tokens, below the
+current Codex effective threshold of about `950000`. It can be tuned with
+`MUSE_PRECOMPACTION_TOKEN_BUDGET`. The compaction state is in-memory and keyed
+by the opaque session identifier; a gateway restart discards it and the next
+long request rebuilds the checkpoint. GPT routes, Omen, and the 4102 Chat
+Completions path do not use this guard.
+
+The Codex model catalog marks Muse with `use_responses_lite=false` so Codex does
+not initiate the incompatible remote-compaction path for that model. GPT and
+Omen retain their existing capability flags. This catalog change does not
+restart Codex; restart it separately after the user chooses a safe boundary.
+
 ## Local development
 
 ```powershell
