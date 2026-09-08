@@ -28,6 +28,7 @@ $SupplementalModelDefinitions = [ordered]@{
         Description = "OpenCode Go contributor model routed through the local LiteLLM gateway."
         Priority = 4
         ContextWindow = 1048576
+        AutoCompactTokenLimit = 900000
         UseResponsesLite = $false
     }
     "opencode-go/omen-alpha" = [ordered]@{
@@ -104,6 +105,9 @@ function Set-SupplementalCodexModelMetadata {
     Set-ModelProperty -Object $Object -Name "priority" -Value $definition.Priority
     Set-ModelProperty -Object $Object -Name "context_window" -Value $definition.ContextWindow
     Set-ModelProperty -Object $Object -Name "max_context_window" -Value $definition.ContextWindow
+    if ($null -ne $definition.AutoCompactTokenLimit) {
+        Set-ModelProperty -Object $Object -Name "auto_compact_token_limit" -Value $definition.AutoCompactTokenLimit
+    }
     if ($null -ne $definition.UseResponsesLite) {
         Set-ModelProperty -Object $Object -Name "use_responses_lite" -Value $definition.UseResponsesLite
     }
