@@ -19,6 +19,12 @@ models:
       model: 'openai/muse-spark-1.3-contributor'
       api_base: 'https://opencode.ai/zen/go/v1'
       api_key: 'os.environ/OPENCODEGO_API_KEY'
+  - id: 'opencode-go/deepseek-flash'
+    mode: responses
+    route:
+      model: 'openai/deepseek-flash'
+      api_base: 'https://opencode.ai/zen/go/v1'
+      api_key: 'os.environ/OPENCODEGO_API_KEY'
   - id: 'opencode-go/omen-alpha'
     mode: chat
     route:

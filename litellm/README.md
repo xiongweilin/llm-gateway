@@ -54,7 +54,7 @@ not the source for the long-running three-port topology.
 ### Retry and timeout policy
 
 `models.yaml` does not set per-model `timeout` or `stream_timeout`. The
-previous 900-second GPT and 3600-second Muse/Omen limits are therefore not
+previous 900-second GPT and 3600-second Muse/DeepSeek/Omen limits are therefore not
 declared by this gateway; LiteLLM may still apply its package-level fallback
 where the underlying request path requires one.
 

@@ -31,6 +31,14 @@ $SupplementalModelDefinitions = [ordered]@{
         AutoCompactTokenLimit = 900000
         UseResponsesLite = $false
     }
+    "opencode-go/deepseek-flash" = [ordered]@{
+        DisplayName = "DeepSeek Flash (OpenCode Go)"
+        Description = "OpenCode Go DeepSeek Flash model routed through the local LiteLLM gateway."
+        Priority = 5
+        ContextWindow = 1048576
+        AutoCompactTokenLimit = 900000
+        UseResponsesLite = $false
+    }
     "opencode-go/omen-alpha" = [ordered]@{
         DisplayName = "Omen Alpha (OpenCode Go)"
         Description = "OpenCode Go Omen Alpha model routed through the local LiteLLM gateway."

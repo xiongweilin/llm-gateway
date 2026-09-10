@@ -101,7 +101,7 @@ def test_collaboration_request_repairs_unqualified_call_name() -> None:
 
 def test_agent_message_conversion_is_scoped_to_opencode_plaintext() -> None:
     plain = {
-        "model": "opencode-go/deepseek-v4-flash",
+        "model": "opencode-go/deepseek-flash",
         "input": [
             {
                 "type": "agent_message",
@@ -189,6 +189,44 @@ def test_muse_compaction_item_is_restored_before_provider_request() -> None:
         request["model"] = "opencode-go/omen-alpha"
         raw = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode()
         assert proxy.normalize_muse_compaction_items(raw) is raw
+    finally:
+        proxy._MUSE_COMPACTION_TOKENS.clear()
+        proxy._MUSE_COMPACTION_TOKENS.update(old_tokens)
+
+
+def test_deepseek_flash_reuses_muse_agent_loop_and_checkpoint_compatibility() -> None:
+    request = {
+        "model": "opencode-go/deepseek-flash",
+        "input": [
+            {"type": "message", "role": "user", "content": []},
+            {
+                "type": "compaction",
+                "id": "cmp_deepseek",
+                "encrypted_content": "gateway-deepseek-test-token",
+            },
+        ],
+    }
+    old_tokens = proxy._MUSE_COMPACTION_TOKENS.copy()
+    try:
+        proxy._MUSE_COMPACTION_TOKENS.clear()
+        proxy._MUSE_COMPACTION_TOKENS["gateway-deepseek-test-token"] = (
+            "Keep the DeepSeek Flash task context."
+        )
+        normalized = json.loads(
+            proxy.normalize_muse_compaction_items(json.dumps(request).encode())
+        )
+        assert [item["type"] for item in normalized["input"]] == [
+            "message",
+            "message",
+        ]
+        assert "Gateway-generated historical checkpoint" in normalized["input"][1]["content"][0]["text"]
+
+        instructions = json.loads(
+            proxy.ensure_muse_autonomous_instructions(
+                json.dumps({"model": request["model"], "input": []}).encode()
+            )
+        )["instructions"]
+        assert "Continue the user's task across tool calls" in instructions
     finally:
         proxy._MUSE_COMPACTION_TOKENS.clear()
         proxy._MUSE_COMPACTION_TOKENS.update(old_tokens)
@@ -681,7 +719,7 @@ def test_request_summary_never_contains_prompt_text() -> None:
 def test_request_summary_records_tool_shapes_without_arguments() -> None:
     body = json.dumps(
         {
-            "model": "opencode-go/deepseek-v4-flash",
+            "model": "opencode-go/deepseek-flash",
             "input": [
                 {"type": "function_call", "name": "exec_command", "arguments": "SECRET"},
                 {"type": "tool_search_call", "arguments": {"query": "SECRET"}},
@@ -713,7 +751,7 @@ def test_request_summary_records_tool_shapes_without_arguments() -> None:
 
 def test_tool_schema_normalization_fixes_null_type() -> None:
     request = {
-        "model": "opencode-go/deepseek-v4-flash",
+        "model": "opencode-go/deepseek-flash",
         "input": [{"type": "message", "role": "user", "content": []}],
         "tools": [
             {
@@ -747,7 +785,7 @@ def test_tool_schema_normalization_fixes_null_type() -> None:
 
 def test_tool_schema_normalization_reaches_nested_namespaces() -> None:
     request = {
-        "model": "opencode-go/deepseek-v4-flash",
+        "model": "opencode-go/deepseek-flash",
         "input": [
             {
                 "type": "additional_tools",
@@ -1050,7 +1088,7 @@ def test_truncate_input_never_leaves_orphaned_tool_outputs() -> None:
     # output". The old boundary trim only removed outputs at the tail edge and
     # missed orphans sitting behind a kept call in interleaved tool rounds.
     request = {
-        "model": "opencode-go/deepseek-v4-flash",
+        "model": "opencode-go/deepseek-flash",
         "input": [
             {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "sys"}]},
             {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "u1"}]},
@@ -1062,7 +1100,7 @@ def test_truncate_input_never_leaves_orphaned_tool_outputs() -> None:
         ],
     }
     inp = request["input"]
-    fixed = proxy._json_tokens({"model": "opencode-go/deepseek-v4-flash", "input": []})
+    fixed = proxy._json_tokens({"model": "opencode-go/deepseek-flash", "input": []})
     # Budget exactly fits head + items[3..]; drops [u1, call_A], keeps call_B
     # with orphaned output call_A still in the tail.
     budget = fixed + proxy._item_tokens(inp[0]) + sum(proxy._item_tokens(i) for i in inp[3:])

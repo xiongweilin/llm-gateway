@@ -67,24 +67,24 @@ when it is a usable short delay, and falls back to its bounded exponential
 backoff otherwise. 400/401/403, quota/configuration failures, timeouts, and
 other error classes are not enabled by this policy.
 
-## Muse context handling
+## Muse and DeepSeek Flash context handling
 
-Codex owns when the Muse Spark 1.3 Contributor conversation is compacted. The
-gateway does not proactively summarize normal Muse requests or rotate the
-provider session just because a local estimate reaches a threshold.
+Codex owns when the Muse Spark 1.3 Contributor or DeepSeek Flash conversation is
+compacted. The gateway does not proactively summarize normal requests or rotate
+the provider session just because a local estimate reaches a threshold.
 
 When Codex sends a `compaction_trigger`, 4100 handles that protocol boundary
-locally: it creates the Muse checkpoint and returns a Responses
+locally: it creates a model-specific OpenCode Go checkpoint and returns a Responses
 `response.compaction` containing the retained user messages followed by exactly
-one gateway compaction item. On the next Muse request, 4100 resolves its
-opaque checkpoint handle back into a normal historical message before
+one gateway compaction item. On the next request for either model, 4100 resolves
+the opaque checkpoint handle back into a normal historical message before
 forwarding the request, so OpenCode Go receives only input item types it
 supports. This path runs only for an explicit Codex compaction request.
 
 The compaction target budget is `900000` estimated tokens and can be tuned with
 `MUSE_COMPACTION_TOKEN_BUDGET`. GPT routes, Omen, and the 4102 Chat Completions
 path do not use this Responses compaction checkpoint path. The Codex model
-catalog marks Muse with `use_responses_lite=false` and an
+catalog marks Muse and DeepSeek Flash with `use_responses_lite=false` and an
 `auto_compact_token_limit` of `900000`.
 
 ## Local development

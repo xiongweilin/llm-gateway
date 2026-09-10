@@ -66,6 +66,7 @@ CONTROL_PLANE_PATH_PREFIX = "/v1/alpha"
 OPENCODE_SESSION_HEADER = "x-opencode-session"
 OPENCODE_MODEL_PREFIX = "opencode-go/"
 MUSE_MODEL_MARKER = "muse-spark-"
+DEEPSEEK_FLASH_MODEL_MARKER = "deepseek-flash"
 MUSE_COMPACTION_MODEL = "opencode-go/muse-spark-1.3-contributor"
 
 
@@ -207,6 +208,18 @@ def is_muse_model(model: object) -> bool:
     )
 
 
+def is_deepseek_flash_model(model: object) -> bool:
+    """Return whether a model is the requested DeepSeek Flash OpenCode Go route."""
+    return isinstance(model, str) and model.startswith(
+        f"{OPENCODE_MODEL_PREFIX}{DEEPSEEK_FLASH_MODEL_MARKER}"
+    )
+
+
+def is_muse_compatible_model(model: object) -> bool:
+    """Return whether a model uses the Muse context/agent-loop handling."""
+    return is_muse_model(model) or is_deepseek_flash_model(model)
+
+
 def resolve_opencode_session(body: bytes, headers: Mapping[str, str]) -> str | None:
     """Resolve a stable session ID for an OpenCode Go Responses request.
 
@@ -338,7 +351,7 @@ def ensure_muse_autonomous_instructions(body: bytes) -> bytes:
     except Exception:
         return body
     model = obj.get("model")
-    if not is_muse_model(model):
+    if not is_muse_compatible_model(model):
         return body
 
     current = obj.get("instructions")
@@ -841,7 +854,7 @@ def normalize_muse_compaction_items(body: bytes) -> bytes:
 
     if not isinstance(obj, dict):
         return body
-    if obj.get("model") != MUSE_COMPACTION_MODEL:
+    if not is_muse_compatible_model(obj.get("model")):
         return body
     items = obj.get("input")
     if not isinstance(items, list):
@@ -987,6 +1000,7 @@ async def _generate_muse_checkpoint(
     backend: str,
     headers: Mapping[str, str],
     opencode_session: str,
+    model: str = MUSE_COMPACTION_MODEL,
 ) -> str:
     prior = ""
     if existing_summary:
@@ -997,7 +1011,7 @@ async def _generate_muse_checkpoint(
         f"{prior}\n\nTranscript to compress:\n{source}"
     )
     payload = {
-        "model": MUSE_COMPACTION_MODEL,
+        "model": model,
         "input": [
             {
                 "type": "message",
@@ -1050,6 +1064,12 @@ async def create_muse_compaction_checkpoint(
     items = obj.get("input")
     if not isinstance(items, list) or len(items) < 3:
         return body, False, opencode_session
+    compaction_model = (
+        obj.get("model")
+        if isinstance(obj.get("model"), str)
+        and is_muse_compatible_model(obj.get("model"))
+        else MUSE_COMPACTION_MODEL
+    )
 
     session_key = _compaction_state_key(opencode_session, items)
     lock = _compaction_lock(session_key)
@@ -1102,6 +1122,7 @@ async def create_muse_compaction_checkpoint(
                 backend,
                 headers,
                 opencode_session,
+                model=compaction_model,
             )
             method = "model"
         except asyncio.CancelledError:
@@ -2561,7 +2582,7 @@ async def handle(
             before = request_summary(dec)
             log.info("request summary %s", json.dumps(before, sort_keys=True))
             dec = normalize_scalar_responses_input(dec)
-            if is_muse_model(model):
+            if is_muse_compatible_model(model):
                 codex_compaction_requested = _has_compaction_trigger(request_obj)
                 dec = normalize_muse_compaction_items(dec)
             if is_opencode_model(model):
@@ -2598,7 +2619,7 @@ async def handle(
             normalized = request_summary(dec)
             if normalized.get("input_types") != before.get("input_types"):
                 log.info("request summary after compatibility %s", json.dumps(normalized, sort_keys=True))
-            if is_muse_model(model) and codex_compaction_requested:
+            if is_muse_compatible_model(model) and codex_compaction_requested:
                 compaction_source_body = dec
                 compaction_source_session = (
                     opencode_session or _OPENCODE_PROCESS_SESSION
