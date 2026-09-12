@@ -22,6 +22,9 @@ $AllowedModelSlugs = @(
     "gpt-5.6-terra",
     "gpt-5.6-luna"
 )
+$OfficialModelContextWindowOverrides = @{
+    "gpt-5.6-sol" = 1050000
+}
 $SupplementalModelDefinitions = [ordered]@{
     "opencode-go/muse-spark-1.3-contributor" = [ordered]@{
         DisplayName = "Muse Spark 1.3 Contributor (OpenCode Go)"
@@ -158,6 +161,11 @@ function Get-ManagedCatalogModels {
         }
 
         Set-ModelProperty -Object $existing -Name "visibility" -Value "list"
+        $contextWindowOverride = $OfficialModelContextWindowOverrides[$slug]
+        if ($null -ne $contextWindowOverride) {
+            Set-ModelProperty -Object $existing -Name "context_window" -Value $contextWindowOverride
+            Set-ModelProperty -Object $existing -Name "max_context_window" -Value $contextWindowOverride
+        }
         [void]$updatedModels.Add($existing)
     }
 
