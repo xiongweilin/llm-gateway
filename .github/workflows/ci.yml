@@ -17,11 +17,32 @@ concurrency:
 jobs:
   validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: litellm
     steps:
       - uses: actions/checkout@v4
       - name: Validate repository basics
+        working-directory: .
         run: |
           test -f README.md || (echo "README missing" && exit 1)
           test -f LICENSE || test -f LICENSE.md || (echo "LICENSE missing" && exit 1)
-          echo "basic checks passed"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Sync locked dependencies
+        run: uv sync --locked --group dev
+      - name: Provide Linux listener inspection compatibility
+        working-directory: .
+        run: |
+          mkdir -p "$RUNNER_TEMP/netstat-compat"
+          cat > "$RUNNER_TEMP/netstat-compat/netstat" <<'EOF'
+          #!/usr/bin/env bash
+          exec python "$GITHUB_WORKSPACE/.github/scripts/netstat_compat.py" "$@"
+          EOF
+          chmod +x "$RUNNER_TEMP/netstat-compat/netstat"
+          echo "$RUNNER_TEMP/netstat-compat" >> "$GITHUB_PATH"
+      - name: Run gateway and conformance tests
+        run: uv run pytest -ra
