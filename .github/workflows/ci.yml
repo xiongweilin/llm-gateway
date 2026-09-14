@@ -22,7 +22,7 @@ jobs:
       run:
         working-directory: litellm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Validate repository basics
         working-directory: .
         run: |
