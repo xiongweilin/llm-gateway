@@ -48,6 +48,14 @@ $SupplementalModelDefinitions = [ordered]@{
         Priority = 5
         ContextWindow = 500000
     }
+    "opencode-go/union-alpha-free" = [ordered]@{
+        DisplayName = "Union Alpha Free (OpenCode Go)"
+        Description = "OpenCode Go Union Alpha Free model routed through the local LiteLLM gateway."
+        Priority = 6
+        # Upstream context limit has not been published in the supplied model entry.
+        # Keep the local catalog conservative until a real protocol probe confirms it.
+        ContextWindow = 400000
+    }
 }
 $SupplementalModelSlugs = @($SupplementalModelDefinitions.Keys)
 $ManagedModelSlugs = @($AllowedModelSlugs + $SupplementalModelSlugs)

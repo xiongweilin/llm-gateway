@@ -88,7 +88,10 @@ def _opaque_session(source: str) -> str:
 
 def _model_requires_session(model: object) -> bool:
     """Return whether the configured chat deployment needs a session header."""
-    return model == "opencode-go/omen-alpha"
+    return model in {
+        "opencode-go/omen-alpha",
+        "opencode-go/union-alpha-free",
+    }
 
 
 def resolve_session(body: bytes, headers: Mapping[str, str]) -> str | None:

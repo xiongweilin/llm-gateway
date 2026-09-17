@@ -39,6 +39,13 @@ model_list:
       api_base: 'https://opencode.ai/zen/go/v1'
       api_key: 'os.environ/OPENCODEGO_API_KEY'
       drop_params: true
+  - model_name: 'opencode-go/union-alpha-free'
+    model_info:
+      mode: chat
+    litellm_params:
+      model: 'anthropic/union-alpha'
+      api_base: 'https://opencode.ai/zen/go/v1/messages'
+      api_key: 'os.environ/OPENCODEGO_API_KEY'
   # END GENERATED RUNTIME MODELS
 litellm_settings:
   cache: false

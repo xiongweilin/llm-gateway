@@ -19,6 +19,14 @@ def test_chat_proxy_adds_session_only_for_chat_deployment() -> None:
     assert session
     assert json.loads(normalized)["extra_headers"]["x-opencode-session"] == session
 
+    union = {"model": "opencode-go/union-alpha-free", "messages": [{"role": "user", "content": "hi"}]}
+    raw_union = json.dumps(union).encode()
+
+    normalized_union, union_session = proxy.ensure_session(raw_union, {})
+
+    assert union_session
+    assert json.loads(normalized_union)["extra_headers"]["x-opencode-session"] == union_session
+
     gpt = {"model": "gpt-5.6-luna", "messages": [{"role": "user", "content": "hi"}]}
     raw_gpt = json.dumps(gpt).encode()
     unchanged, no_session = proxy.ensure_session(raw_gpt, {})
@@ -75,6 +83,7 @@ def test_chat_proxy_enforces_protocol_boundary_and_filters_models() -> None:
 
 def test_chat_proxy_session_requires_formal_model_id() -> None:
     assert proxy._model_requires_session("opencode-go/omen-alpha")
+    assert proxy._model_requires_session("opencode-go/union-alpha-free")
     assert not proxy._model_requires_session("omen-alpha")
 
 
