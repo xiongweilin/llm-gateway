@@ -294,6 +294,58 @@ def test_union_stream_bridge_restores_tool_identity_before_first_event() -> None
     assert completed["response"]["output"][0]["namespace"] == "functions"
 
 
+def test_buffered_responses_stream_emits_text_and_custom_tool_events() -> None:
+    response = {
+        "id": "resp_buffered",
+        "object": "response",
+        "created_at": 1700000002,
+        "status": "completed",
+        "model": "opencode-go/union-alpha-free",
+        "output": [
+            {
+                "id": "msg_buffered",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [
+                    {"type": "output_text", "text": "OK", "annotations": []}
+                ],
+            },
+            {
+                "id": "call_buffered",
+                "type": "custom_tool_call",
+                "call_id": "call_buffered",
+                "name": "exec",
+                "input": "return 1;",
+            },
+        ],
+        "usage": {
+            "input_tokens": 1,
+            "output_tokens": 2,
+            "total_tokens": 3,
+        },
+        "output_text": "OK",
+    }
+
+    events = _events(bridge.response_to_sse(response, include_output_events=True))
+    event_types = [event["type"] for event in events]
+
+    assert event_types[:2] == ["response.created", "response.in_progress"]
+    assert "response.output_text.delta" in event_types
+    assert "response.output_text.done" in event_types
+    assert "response.custom_tool_call_input.delta" in event_types
+    assert "response.custom_tool_call_input.done" in event_types
+    assert event_types[-1] == "response.completed"
+
+    added_items = [
+        event["item"]
+        for event in events
+        if event["type"] == "response.output_item.added"
+    ]
+    assert added_items[0]["content"] == []
+    assert added_items[1]["input"] == ""
+
+
 def test_unified_ingress_routes_responses_and_chat_to_chat_hop() -> None:
     async def run() -> None:
         upstream_requests: list[tuple[str, dict, str | None]] = []
@@ -390,7 +442,33 @@ def test_unified_ingress_routes_responses_and_chat_to_chat_hop() -> None:
                 assert union_response.status == 200
                 assert (await union_response.json())["output"][0]["content"][0]["text"] == "routed"
 
+                union_stream = await client.post(
+                    f"http://127.0.0.1:{proxy_port}/v1/responses",
+                    headers={
+                        "x-codex-turn-metadata": json.dumps(
+                            {"threadId": "union-integration-thread", "turnId": "turn-2"}
+                        )
+                    },
+                    json={
+                        "model": "opencode-go/union-alpha-free",
+                        "input": "hello",
+                        "reasoning": {"effort": "high"},
+                        "stream": True,
+                    },
+                )
+                assert union_stream.status == 200
+                stream_events = _events(await union_stream.read())
+                stream_event_types = [event["type"] for event in stream_events]
+                assert "response.output_text.delta" in stream_event_types
+                completed_stream = next(
+                    event
+                    for event in stream_events
+                    if event["type"] == "response.completed"
+                )
+                assert completed_stream["response"]["output"][0]["content"][0]["text"] == "routed"
+
             assert [path for path, _, _ in upstream_requests] == [
+                "/v1/chat/completions",
                 "/v1/chat/completions",
                 "/v1/chat/completions",
                 "/v1/chat/completions",
@@ -407,6 +485,13 @@ def test_unified_ingress_routes_responses_and_chat_to_chat_hop() -> None:
             }
             assert "reasoning_effort" not in upstream_requests[2][1]
             assert upstream_requests[2][2].startswith("chat-")
+            assert upstream_requests[3][1]["stream"] is False
+            assert upstream_requests[3][1]["thinking"] == {
+                "type": "enabled",
+                "budget_tokens": 4096,
+            }
+            assert "reasoning_effort" not in upstream_requests[3][1]
+            assert upstream_requests[3][2].startswith("chat-")
         finally:
             await proxy_session.close()
             await proxy_runner.cleanup()

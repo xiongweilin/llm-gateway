@@ -859,14 +859,203 @@ def chat_sse_to_responses_json(
     return json.dumps(bridge.response_object(), ensure_ascii=False, separators=(",", ":")).encode()
 
 
-def response_to_sse(response: dict) -> bytes:
-    """Emit a minimal valid Responses stream for a converted JSON response."""
+def response_to_sse(
+    response: dict,
+    include_output_events: bool = False,
+) -> bytes:
+    """Emit a Responses stream for a converted JSON response.
+
+    The default keeps the historical lifecycle-only wrapper for existing chat
+    routes.  Some providers accept a buffered request but cannot reliably
+    stream; those callers can request the complete output-item event sequence
+    so a Responses client still receives text and tool calls through its
+    streaming interface.
+    """
     created = dict(response)
     created["status"] = "in_progress"
-    return b"".join(
-        (
-            _sse_frame("response.created", {"response": created}),
-            _sse_frame("response.in_progress", {"response": created}),
-            _sse_frame("response.completed", {"response": response}),
-        )
-    )
+    if include_output_events:
+        created["output"] = []
+    frames = [
+        _sse_frame("response.created", {"response": created}),
+        _sse_frame("response.in_progress", {"response": created}),
+    ]
+
+    if include_output_events:
+        response_id = response.get("id") or "resp_stream"
+        output = response.get("output")
+        if isinstance(output, list):
+            for output_index, item in enumerate(output):
+                if not isinstance(item, dict):
+                    continue
+                item_id = item.get("id") or f"{response_id}_item_{output_index}"
+                item_type = item.get("type")
+                added_item = dict(item)
+                if item_type == "message":
+                    added_item["status"] = "in_progress"
+                    added_item["content"] = []
+                elif item_type == "reasoning":
+                    added_item["summary"] = []
+                elif item_type == "function_call":
+                    added_item["arguments"] = ""
+                elif item_type == "custom_tool_call":
+                    added_item["input"] = ""
+                frames.append(
+                    _sse_frame(
+                        "response.output_item.added",
+                        {"output_index": output_index, "item": added_item},
+                    )
+                )
+
+                if item_type == "message":
+                    content = item.get("content")
+                    if isinstance(content, str):
+                        content = [{"type": "output_text", "text": content, "annotations": []}]
+                    if not isinstance(content, list):
+                        content = []
+                    for content_index, part in enumerate(content):
+                        if not isinstance(part, dict):
+                            continue
+                        text = part.get("text")
+                        if not isinstance(text, str):
+                            text = ""
+                        part_type = part.get("type") or "output_text"
+                        added_part = dict(part)
+                        added_part["type"] = part_type
+                        added_part["text"] = ""
+                        added_part.setdefault("annotations", [])
+                        frames.append(
+                            _sse_frame(
+                                "response.content_part.added",
+                                {
+                                    "output_index": output_index,
+                                    "content_index": content_index,
+                                    "item_id": item_id,
+                                    "part": added_part,
+                                },
+                            )
+                        )
+                        if part_type == "output_text" and text:
+                            frames.append(
+                                _sse_frame(
+                                    "response.output_text.delta",
+                                    {
+                                        "item_id": item_id,
+                                        "output_index": output_index,
+                                        "content_index": content_index,
+                                        "delta": text,
+                                    },
+                                )
+                            )
+                        if part_type == "output_text":
+                            frames.append(
+                                _sse_frame(
+                                    "response.output_text.done",
+                                    {
+                                        "item_id": item_id,
+                                        "output_index": output_index,
+                                        "content_index": content_index,
+                                        "text": text,
+                                    },
+                                )
+                            )
+                        frames.append(
+                            _sse_frame(
+                                "response.content_part.done",
+                                {
+                                    "item_id": item_id,
+                                    "output_index": output_index,
+                                    "content_index": content_index,
+                                    "part": part,
+                                },
+                            )
+                        )
+                elif item_type == "reasoning":
+                    summary = item.get("summary")
+                    if isinstance(summary, list):
+                        for part in summary:
+                            if not isinstance(part, dict) or part.get("type") != "summary_text":
+                                continue
+                            text = part.get("text")
+                            if not isinstance(text, str):
+                                text = ""
+                            if text:
+                                frames.append(
+                                    _sse_frame(
+                                        "response.reasoning_summary_text.delta",
+                                        {
+                                            "item_id": item_id,
+                                            "output_index": output_index,
+                                            "delta": text,
+                                        },
+                                    )
+                                )
+                            frames.append(
+                                _sse_frame(
+                                    "response.reasoning_summary_text.done",
+                                    {
+                                        "item_id": item_id,
+                                        "output_index": output_index,
+                                        "text": text,
+                                    },
+                                )
+                            )
+                elif item_type == "function_call":
+                    arguments = item.get("arguments")
+                    if not isinstance(arguments, str):
+                        arguments = _json_text(arguments)
+                    if arguments:
+                        frames.append(
+                            _sse_frame(
+                                "response.function_call_arguments.delta",
+                                {
+                                    "item_id": item_id,
+                                    "output_index": output_index,
+                                    "delta": arguments,
+                                },
+                            )
+                        )
+                    frames.append(
+                        _sse_frame(
+                            "response.function_call_arguments.done",
+                            {
+                                "item_id": item_id,
+                                "output_index": output_index,
+                                "arguments": arguments,
+                            },
+                        )
+                    )
+                elif item_type == "custom_tool_call":
+                    input_value = item.get("input")
+                    if not isinstance(input_value, str):
+                        input_value = _json_text(input_value)
+                    if input_value:
+                        frames.append(
+                            _sse_frame(
+                                "response.custom_tool_call_input.delta",
+                                {
+                                    "item_id": item_id,
+                                    "output_index": output_index,
+                                    "delta": input_value,
+                                },
+                            )
+                        )
+                    frames.append(
+                        _sse_frame(
+                            "response.custom_tool_call_input.done",
+                            {
+                                "item_id": item_id,
+                                "output_index": output_index,
+                                "input": input_value,
+                            },
+                        )
+                    )
+
+                frames.append(
+                    _sse_frame(
+                        "response.output_item.done",
+                        {"output_index": output_index, "item": dict(item)},
+                    )
+                )
+
+    frames.append(_sse_frame("response.completed", {"response": response}))
+    return b"".join(frames)

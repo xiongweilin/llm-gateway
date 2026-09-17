@@ -2804,6 +2804,15 @@ async def handle(
                         },
                         status=400,
                     )
+                if is_union_alpha_free_model(model) and caller_stream:
+                    # Console Go's Union deployment is reliable for buffered
+                    # Chat responses but has returned empty/failed streaming
+                    # responses. Keep the public Responses stream contract and
+                    # buffer only this model's internal provider request.
+                    chat_request["stream"] = False
+                    log.info(
+                        "Union upstream stream compatibility: using buffered Chat response"
+                    )
                 dec = json.dumps(chat_request, ensure_ascii=False, separators=(",", ":")).encode()
                 upstream_path = CHAT_COMPLETIONS_PATH
         else:
@@ -2888,7 +2897,12 @@ async def handle(
                         response.headers["Content-Type"] = "text/event-stream"
                         response.headers["Cache-Control"] = "no-cache"
                         await response.prepare(req)
-                        await response.write(response_to_sse(response_obj))
+                        await response.write(
+                            response_to_sse(
+                                response_obj,
+                                include_output_events=is_union_alpha_free_model(model),
+                            )
+                        )
                         await response.write_eof()
                         return response
                     response = aiohttp.web.StreamResponse(status=up.status)
