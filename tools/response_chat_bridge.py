@@ -71,11 +71,73 @@ def _content_to_chat(content):
     return parts
 
 
-def _tool_name(item: dict, tool_name_map: dict[str, tuple[str, str]]) -> str:
+def _union_safe_tool_component(value: str) -> str:
+    """Normalize one Union tool-name component for Console Go."""
+    chars: list[str] = []
+    separator = False
+    for char in value:
+        if (
+            "a" <= char <= "z"
+            or "A" <= char <= "Z"
+            or "0" <= char <= "9"
+        ):
+            chars.append(char)
+            separator = False
+        elif not separator:
+            chars.append("_")
+            separator = True
+    normalized = "".join(chars).strip("_") or "tool"
+    if normalized == "exec":
+        return "run_code"
+    return normalized
+
+
+def _register_tool_alias(
+    alias: str,
+    namespace: str | None,
+    name: str,
+    tool_name_map: dict[str, tuple[str | None, str]],
+) -> str:
+    """Register a reversible provider alias, avoiding per-request collisions."""
+    original = (namespace, name)
+    existing = tool_name_map.get(alias)
+    if existing is None or existing == original:
+        tool_name_map[alias] = original
+        return alias
+
+    suffix = 2
+    while True:
+        candidate = f"{alias}_{suffix}"
+        existing = tool_name_map.get(candidate)
+        if existing is None or existing == original:
+            tool_name_map[candidate] = original
+            return candidate
+        suffix += 1
+
+
+def _union_safe_tool_name(
+    namespace: str | None,
+    name: str,
+    tool_name_map: dict[str, tuple[str | None, str]],
+) -> str:
+    """Create a provider-safe Union alias and retain its original identity."""
+    components = [_union_safe_tool_component(name)]
+    if namespace:
+        components.insert(0, _union_safe_tool_component(namespace))
+    return _register_tool_alias("_".join(components), namespace, name, tool_name_map)
+
+
+def _tool_name(
+    item: dict,
+    tool_name_map: dict[str, tuple[str | None, str]],
+    union_safe: bool = False,
+) -> str:
     name = item.get("name")
     if not isinstance(name, str) or not name:
         name = "tool"
     namespace = item.get("namespace")
+    if union_safe:
+        return _union_safe_tool_name(namespace, name, tool_name_map)
     if isinstance(namespace, str) and namespace:
         flat = f"{namespace}__{name}"
         tool_name_map.setdefault(flat, (namespace, name))
@@ -83,7 +145,11 @@ def _tool_name(item: dict, tool_name_map: dict[str, tuple[str, str]]) -> str:
     return name
 
 
-def _flatten_tools(tools: Iterable, tool_name_map: dict[str, tuple[str, str]]) -> list[dict]:
+def _flatten_tools(
+    tools: Iterable,
+    tool_name_map: dict[str, tuple[str | None, str]],
+    union_safe: bool = False,
+) -> list[dict]:
     flattened: list[dict] = []
 
     def visit(tool, namespace: str | None = None) -> None:
@@ -103,8 +169,11 @@ def _flatten_tools(tools: Iterable, tool_name_map: dict[str, tuple[str, str]]) -
         name = tool.get("name")
         if not isinstance(name, str) or not name:
             return
-        flat_name = name
-        if namespace:
+        if union_safe:
+            flat_name = _union_safe_tool_name(namespace, name, tool_name_map)
+        else:
+            flat_name = name
+        if namespace and not union_safe:
             flat_name = f"{namespace}__{name}"
             tool_name_map[flat_name] = (namespace, name)
 
@@ -125,8 +194,13 @@ def _flatten_tools(tools: Iterable, tool_name_map: dict[str, tuple[str, str]]) -
     return flattened
 
 
-def _append_function_call(messages: list[dict], item: dict, tool_name_map: dict[str, tuple[str, str]]) -> None:
-    name = _tool_name(item, tool_name_map)
+def _append_function_call(
+    messages: list[dict],
+    item: dict,
+    tool_name_map: dict[str, tuple[str | None, str]],
+    union_safe: bool = False,
+) -> None:
+    name = _tool_name(item, tool_name_map, union_safe=union_safe)
     call_id = item.get("call_id") or item.get("id") or f"call_{len(messages)}"
     arguments = _json_text(item.get("arguments", item.get("input", "")))
     if (
@@ -185,7 +259,9 @@ def _union_thinking_from_responses(body: dict) -> dict | None:
     return {"type": "enabled", "budget_tokens": budget_tokens}
 
 
-def responses_to_chat_request(body: dict) -> tuple[dict, dict[str, tuple[str, str]]]:
+def responses_to_chat_request(
+    body: dict,
+) -> tuple[dict, dict[str, tuple[str | None, str]]]:
     """Convert one Responses request to a Chat Completions request.
 
     The second return value maps flattened names back to their original
@@ -193,7 +269,8 @@ def responses_to_chat_request(body: dict) -> tuple[dict, dict[str, tuple[str, st
     """
     chat: dict = {"model": body.get("model")}
     messages: list[dict] = []
-    tool_name_map: dict[str, tuple[str, str]] = {}
+    tool_name_map: dict[str, tuple[str | None, str]] = {}
+    union_safe = body.get("model") == UNION_ALPHA_FREE_MODEL
 
     instructions = body.get("instructions")
     if isinstance(instructions, str) and instructions:
@@ -212,7 +289,12 @@ def responses_to_chat_request(body: dict) -> tuple[dict, dict[str, tuple[str, st
             ):
                 _append_message(messages, item)
             elif item_type in {"function_call", "custom_tool_call", "local_shell_call"}:
-                _append_function_call(messages, item, tool_name_map)
+                _append_function_call(
+                    messages,
+                    item,
+                    tool_name_map,
+                    union_safe=union_safe,
+                )
             elif item_type in {
                 "function_call_output",
                 "custom_tool_call_output",
@@ -230,7 +312,11 @@ def responses_to_chat_request(body: dict) -> tuple[dict, dict[str, tuple[str, st
 
     tools = body.get("tools")
     if isinstance(tools, list):
-        flattened_tools = _flatten_tools(tools, tool_name_map)
+        flattened_tools = _flatten_tools(
+            tools,
+            tool_name_map,
+            union_safe=union_safe,
+        )
         if flattened_tools:
             chat["tools"] = flattened_tools
             # Console Go currently accepts only the generic choice.
@@ -313,7 +399,10 @@ def _response_usage(usage) -> dict:
     return normalized
 
 
-def _restore_tool_name(name: str, tool_name_map: dict[str, tuple[str, str]]) -> tuple[str, str | None]:
+def _restore_tool_name(
+    name: str,
+    tool_name_map: dict[str, tuple[str | None, str]],
+) -> tuple[str, str | None]:
     mapped = tool_name_map.get(name)
     if mapped is None:
         return name, None
@@ -324,7 +413,7 @@ def _restore_tool_name(name: str, tool_name_map: dict[str, tuple[str, str]]) -> 
 def chat_response_to_responses(
     chat_response: dict,
     response_model: str | None = None,
-    tool_name_map: dict[str, tuple[str, str]] | None = None,
+    tool_name_map: dict[str, tuple[str | None, str]] | None = None,
 ) -> dict:
     """Convert a non-streaming Chat Completions response to Responses."""
     tool_name_map = tool_name_map or {}
@@ -410,9 +499,15 @@ def _sse_frame(event_type: str, payload: dict) -> bytes:
 class ChatStreamBridge:
     """Incrementally convert Chat Completions SSE chunks to Responses SSE."""
 
-    def __init__(self, response_model: str | None = None, tool_name_map=None):
+    def __init__(
+        self,
+        response_model: str | None = None,
+        tool_name_map=None,
+        restore_tool_names: bool = False,
+    ):
         self.response_model = response_model
         self.tool_name_map = tool_name_map or {}
+        self.restore_tool_names = restore_tool_names
         self._buffer = b""
         self._response_id: str | None = None
         self._created_at = int(time.time())
@@ -503,6 +598,11 @@ class ChatStreamBridge:
             return []
         function = call.get("function") if isinstance(call.get("function"), dict) else {}
         name = function.get("name") if isinstance(function.get("name"), str) else "tool"
+        namespace = None
+        if self.restore_tool_names:
+            mapped = self.tool_name_map.get(name)
+            if mapped is not None:
+                namespace, name = mapped
         call_id = call.get("id") or f"{self._response_id}_call_{index}"
         item = {
             "id": call_id,
@@ -511,6 +611,8 @@ class ChatStreamBridge:
             "name": name,
             "arguments": "",
         }
+        if namespace:
+            item["namespace"] = namespace
         state = {"item": item, "index": len(self._output), "arguments": ""}
         self._tools[index] = state
         self._output.append(item)
@@ -655,7 +757,10 @@ class ChatStreamBridge:
             mapped = self.tool_name_map.get(name)
             if mapped is not None:
                 namespace, original = mapped
-                item["namespace"] = namespace
+                if namespace:
+                    item["namespace"] = namespace
+                else:
+                    item.pop("namespace", None)
                 item["name"] = original
             item["arguments"] = state["arguments"]
             output.extend(

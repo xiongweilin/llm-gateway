@@ -107,6 +107,61 @@ def test_union_reasoning_effort_is_converted_to_anthropic_thinking() -> None:
     assert "thinking" not in omen_converted
 
 
+def test_union_tools_use_provider_safe_aliases() -> None:
+    converted, name_map = bridge.responses_to_chat_request(
+        {
+            "model": "opencode-go/union-alpha-free",
+            "input": [
+                {
+                    "type": "function_call",
+                    "namespace": "functions",
+                    "name": "exec",
+                    "call_id": "call_exec",
+                    "arguments": {"code": "return 1;"},
+                }
+            ],
+            "tools": [
+                {
+                    "type": "namespace",
+                    "name": "functions",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "exec",
+                            "description": "Run code.",
+                            "parameters": {"type": "object", "properties": {}},
+                        }
+                    ],
+                },
+                {
+                    "type": "namespace",
+                    "name": "mcp__cua_repl",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "js",
+                            "description": "Run JavaScript.",
+                            "parameters": {"type": "object", "properties": {}},
+                        }
+                    ],
+                },
+            ],
+        }
+    )
+
+    assert converted["messages"][0]["tool_calls"][0]["function"]["name"] == (
+        "functions_run_code"
+    )
+    assert [tool["function"]["name"] for tool in converted["tools"]] == [
+        "functions_run_code",
+        "mcp_cua_repl_js",
+    ]
+    assert name_map == {
+        "functions_run_code": ("functions", "exec"),
+        "mcp_cua_repl_js": ("mcp__cua_repl", "js"),
+    }
+
+
 def test_chat_response_is_converted_to_responses_function_call() -> None:
     response = {
         "id": "chatcmpl_123",
@@ -209,6 +264,34 @@ def test_chat_stream_bridge_preserves_text_and_tool_call_events() -> None:
     assert output[1]["type"] == "function_call"
     assert output[1]["namespace"] == "shell"
     assert output[1]["name"] == "run"
+
+
+def test_union_stream_bridge_restores_tool_identity_before_first_event() -> None:
+    bridge_instance = bridge.ChatStreamBridge(
+        response_model="opencode-go/union-alpha-free",
+        tool_name_map={"functions_run_code": ("functions", "exec")},
+        restore_tool_names=True,
+    )
+    stream = b"".join(
+        [
+            b'data: {"id":"chatcmpl_union_stream","created":1700000001,"model":"union-alpha-free","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_exec","function":{"name":"functions_run_code","arguments":"{\\"code\\":\\"return 1;\\"}"}}]},"finish_reason":null}]}'
+            b"\n\n",
+            b"data: [DONE]\n\n",
+        ]
+    )
+
+    events = _events(bridge_instance.feed(stream, final=True))
+    added = next(
+        event
+        for event in events
+        if event["type"] == "response.output_item.added"
+    )
+    completed = next(event for event in events if event["type"] == "response.completed")
+
+    assert added["item"]["name"] == "exec"
+    assert added["item"]["namespace"] == "functions"
+    assert completed["response"]["output"][0]["name"] == "exec"
+    assert completed["response"]["output"][0]["namespace"] == "functions"
 
 
 def test_unified_ingress_routes_responses_and_chat_to_chat_hop() -> None:

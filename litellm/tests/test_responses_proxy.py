@@ -890,6 +890,41 @@ def test_custom_tool_declarations_are_bridged_for_opencode() -> None:
     assert proxy.normalize_opencode_custom_tools(raw) is raw
 
 
+def test_union_custom_exec_uses_provider_safe_code_argument() -> None:
+    request = {
+        "model": "opencode-go/union-alpha-free",
+        "tools": [
+            {
+                "type": "namespace",
+                "name": "functions",
+                "tools": [
+                    {"type": "custom", "name": "exec", "description": "Run code."}
+                ],
+            }
+        ],
+        "input": [
+            {
+                "type": "custom_tool_call",
+                "namespace": "functions",
+                "name": "exec",
+                "custom_tool_call_id": "call_exec",
+                "input": "return 1;",
+            }
+        ],
+    }
+
+    normalized = json.loads(
+        proxy.normalize_opencode_custom_tools(json.dumps(request).encode())
+    )
+
+    declaration = normalized["tools"][0]["tools"][0]
+    assert declaration["type"] == "function"
+    assert list(declaration["parameters"]["properties"]) == ["code"]
+    assert declaration["parameters"]["required"] == ["code"]
+    assert normalized["input"][0]["type"] == "function_call"
+    assert json.loads(normalized["input"][0]["arguments"]) == {"code": "return 1;"}
+
+
 def test_custom_exec_json_input_is_restored_to_javascript() -> None:
     assert proxy._custom_input_from_arguments(
         '{"input":"{\\"cmd\\":\\"Get-Location\\"}"}',
@@ -901,6 +936,10 @@ def test_custom_exec_json_input_is_restored_to_javascript() -> None:
     ) == "return 1;"
     assert proxy._custom_input_from_arguments(
         '{"input":"const result = 1;"}',
+        "exec",
+    ) == "const result = 1;"
+    assert proxy._custom_input_from_arguments(
+        '{"code":"const result = 1;"}',
         "exec",
     ) == "const result = 1;"
 

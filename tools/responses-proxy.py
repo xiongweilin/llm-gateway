@@ -1591,12 +1591,12 @@ def normalize_opencode_search_tool_fields(body: bytes) -> bytes:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
 
 
-def _custom_tool_parameters() -> dict:
+def _custom_tool_parameters(argument_name: str = "input") -> dict:
     """Expose a Responses custom tool to OpenCode as one string property."""
     return {
         "type": "object",
         "properties": {
-            "input": {
+            argument_name: {
                 "type": "string",
                 "description": (
                     "JavaScript source executed by Codex; return runnable JavaScript, "
@@ -1605,7 +1605,7 @@ def _custom_tool_parameters() -> dict:
                 ),
             }
         },
-        "required": ["input"],
+        "required": [argument_name],
         "additionalProperties": False,
     }
 
@@ -1675,7 +1675,11 @@ def _normalize_custom_exec_input(value: str) -> str:
     return f"return await tools.exec_command({request});"
 
 
-def _custom_arguments(input_value, tool_name: str | None = None) -> str:
+def _custom_arguments(
+    input_value,
+    tool_name: str | None = None,
+    argument_name: str = "input",
+) -> str:
     if isinstance(input_value, str):
         raw_input = input_value
     elif input_value is None:
@@ -1685,7 +1689,7 @@ def _custom_arguments(input_value, tool_name: str | None = None) -> str:
     if tool_name == "exec":
         raw_input = _normalize_custom_exec_input(raw_input)
     return json.dumps(
-        {"input": raw_input},
+        {argument_name: raw_input},
         ensure_ascii=False,
         separators=(",", ":"),
     )
@@ -1699,8 +1703,11 @@ def _custom_input_from_arguments(arguments, tool_name: str | None = None) -> str
             return arguments
     else:
         parsed = arguments
-    if isinstance(parsed, dict) and "input" in parsed:
-        parsed = parsed["input"]
+    if isinstance(parsed, dict):
+        if "input" in parsed:
+            parsed = parsed["input"]
+        elif tool_name == "exec" and "code" in parsed:
+            parsed = parsed["code"]
     if isinstance(parsed, str):
         return _normalize_custom_exec_input(parsed) if tool_name == "exec" else parsed
     if parsed is None:
@@ -1709,9 +1716,16 @@ def _custom_input_from_arguments(arguments, tool_name: str | None = None) -> str
     return _normalize_custom_exec_input(raw_input) if tool_name == "exec" else raw_input
 
 
-def _convert_custom_history_items(value, custom_names: set[str]):
+def _convert_custom_history_items(
+    value,
+    custom_names: set[str],
+    union_safe: bool = False,
+):
     if isinstance(value, list):
-        return [_convert_custom_history_items(child, custom_names) for child in value]
+        return [
+            _convert_custom_history_items(child, custom_names, union_safe=union_safe)
+            for child in value
+        ]
     if not isinstance(value, dict):
         return value
 
@@ -1726,7 +1740,12 @@ def _convert_custom_history_items(value, custom_names: set[str]):
         if "call_id" not in converted and isinstance(value.get("custom_tool_call_id"), str):
             converted["call_id"] = value["custom_tool_call_id"]
         converted["type"] = "function_call"
-        converted["arguments"] = _custom_arguments(value.get("input"), name)
+        argument_name = "code" if union_safe and name == "exec" else "input"
+        converted["arguments"] = _custom_arguments(
+            value.get("input"),
+            name,
+            argument_name=argument_name,
+        )
         return converted
     if item_type == "custom_tool_call_output":
         converted = {
@@ -1739,14 +1758,25 @@ def _convert_custom_history_items(value, custom_names: set[str]):
         converted["type"] = "function_call_output"
         return converted
     return {
-        key: _convert_custom_history_items(child, custom_names)
+        key: _convert_custom_history_items(
+            child,
+            custom_names,
+            union_safe=union_safe,
+        )
         for key, child in value.items()
     }
 
 
-def _convert_custom_declarations(value, custom_names: set[str]):
+def _convert_custom_declarations(
+    value,
+    custom_names: set[str],
+    union_safe: bool = False,
+):
     if isinstance(value, list):
-        return [_convert_custom_declarations(child, custom_names) for child in value]
+        return [
+            _convert_custom_declarations(child, custom_names, union_safe=union_safe)
+            for child in value
+        ]
     if not isinstance(value, dict):
         return value
     if value.get("type") == "custom" and value.get("name") in custom_names:
@@ -1758,10 +1788,16 @@ def _convert_custom_declarations(value, custom_names: set[str]):
             "type": "function",
             "name": name,
             "description": description,
-            "parameters": _custom_tool_parameters(),
+            "parameters": _custom_tool_parameters(
+                "code" if union_safe and name == "exec" else "input"
+            ),
         }
     return {
-        key: _convert_custom_declarations(child, custom_names)
+        key: _convert_custom_declarations(
+            child,
+            custom_names,
+            union_safe=union_safe,
+        )
         for key, child in value.items()
     }
 
@@ -1788,11 +1824,17 @@ def normalize_opencode_custom_tools(body: bytes) -> bytes:
     if not custom_names:
         return body
 
-    normalized = _convert_custom_declarations(obj, custom_names)
+    union_safe = model == UNION_ALPHA_FREE_MODEL
+    normalized = _convert_custom_declarations(
+        obj,
+        custom_names,
+        union_safe=union_safe,
+    )
     if isinstance(normalized.get("input"), list):
         normalized["input"] = _convert_custom_history_items(
             normalized["input"],
             custom_names,
+            union_safe=union_safe,
         )
     log.info(
         "OpenCode Go custom tool compatibility: bridged=%d",
@@ -2853,7 +2895,11 @@ async def handle(
                     response.headers["Content-Type"] = "text/event-stream"
                     response.headers["Cache-Control"] = "no-cache"
                     await response.prepare(req)
-                    bridge = ChatStreamBridge(model if isinstance(model, str) else None, tool_name_map)
+                    bridge = ChatStreamBridge(
+                        model if isinstance(model, str) else None,
+                        tool_name_map,
+                        restore_tool_names=is_union_alpha_free_model(model),
+                    )
                     pending = b""
                     rewritten_calls = 0
                     async for chunk in up.content.iter_any():
