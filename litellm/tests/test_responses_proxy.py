@@ -1251,6 +1251,24 @@ def test_opencode_session_is_injected_without_touching_gpt_requests() -> None:
     assert gpt_session is None
 
 
+def test_union_session_uses_chat_compatible_namespace_without_muse_handling() -> None:
+    union = {"model": "opencode-go/union-alpha-free", "input": []}
+    first_body, first_session = proxy.ensure_opencode_session(
+        json.dumps(union).encode(),
+        {"x-codex-turn-metadata": json.dumps({"threadId": "union-thread-1", "turnId": "turn-1"})},
+    )
+    second_body, second_session = proxy.ensure_opencode_session(
+        json.dumps(union).encode(),
+        {"x-codex-turn-metadata": json.dumps({"threadId": "union-thread-1", "turnId": "turn-2"})},
+    )
+
+    assert first_session and first_session.startswith("chat-")
+    assert first_session == second_session
+    assert json.loads(first_body)["extra_headers"]["x-opencode-session"] == first_session
+    assert json.loads(second_body)["extra_headers"]["x-opencode-session"] == second_session
+    assert not proxy.is_muse_compatible_model(union["model"])
+
+
 def test_set_opencode_session_replaces_embedded_epoch_without_touching_gpt() -> None:
     muse = {
         "model": "opencode-go/muse-spark-1.3-contributor",

@@ -86,6 +86,27 @@ def test_responses_request_is_converted_to_chat_with_tools_and_history() -> None
     assert name_map == {"shell__run": ("shell", "run")}
 
 
+def test_union_reasoning_effort_is_converted_to_anthropic_thinking() -> None:
+    converted, _ = bridge.responses_to_chat_request(
+        {
+            "model": "opencode-go/union-alpha-free",
+            "input": "check",
+            "reasoning": {"effort": "high"},
+        }
+    )
+
+    assert converted["thinking"] == {"type": "enabled", "budget_tokens": 4096}
+
+    omen_converted, _ = bridge.responses_to_chat_request(
+        {
+            "model": "opencode-go/omen-alpha",
+            "input": "check",
+            "reasoning": {"effort": "high"},
+        }
+    )
+    assert "thinking" not in omen_converted
+
+
 def test_chat_response_is_converted_to_responses_function_call() -> None:
     response = {
         "id": "chatcmpl_123",
@@ -192,11 +213,11 @@ def test_chat_stream_bridge_preserves_text_and_tool_call_events() -> None:
 
 def test_unified_ingress_routes_responses_and_chat_to_chat_hop() -> None:
     async def run() -> None:
-        upstream_requests: list[tuple[str, dict]] = []
+        upstream_requests: list[tuple[str, dict, str | None]] = []
 
         async def upstream_handler(request: web.Request) -> web.Response:
             body = await request.json()
-            upstream_requests.append((request.path, body))
+            upstream_requests.append((request.path, body, request.headers.get("x-opencode-session")))
             if request.path == "/v1/chat/completions":
                 return web.json_response(
                     {
@@ -234,7 +255,7 @@ def test_unified_ingress_routes_responses_and_chat_to_chat_hop() -> None:
                 proxy_session,
                 None,
                 {"responses-model"},
-                {"chat-model"},
+                {"chat-model", "opencode-go/union-alpha-free"},
                 upstream_url,
             ),
         )
@@ -269,7 +290,25 @@ def test_unified_ingress_routes_responses_and_chat_to_chat_hop() -> None:
                 assert direct_chat.status == 200
                 assert (await direct_chat.json())["choices"][0]["message"]["content"] == "routed"
 
-            assert [path for path, _ in upstream_requests] == [
+                union_response = await client.post(
+                    f"http://127.0.0.1:{proxy_port}/v1/responses",
+                    headers={
+                        "x-codex-turn-metadata": json.dumps(
+                            {"threadId": "union-integration-thread", "turnId": "turn-1"}
+                        )
+                    },
+                    json={
+                        "model": "opencode-go/union-alpha-free",
+                        "input": "hello",
+                        "reasoning": {"effort": "high"},
+                        "stream": False,
+                    },
+                )
+                assert union_response.status == 200
+                assert (await union_response.json())["output"][0]["content"][0]["text"] == "routed"
+
+            assert [path for path, _, _ in upstream_requests] == [
+                "/v1/chat/completions",
                 "/v1/chat/completions",
                 "/v1/chat/completions",
             ]
@@ -279,6 +318,12 @@ def test_unified_ingress_routes_responses_and_chat_to_chat_hop() -> None:
             assert upstream_requests[1][1]["messages"] == [
                 {"role": "user", "content": "hello"}
             ]
+            assert upstream_requests[2][1]["thinking"] == {
+                "type": "enabled",
+                "budget_tokens": 4096,
+            }
+            assert "reasoning_effort" not in upstream_requests[2][1]
+            assert upstream_requests[2][2].startswith("chat-")
         finally:
             await proxy_session.close()
             await proxy_runner.cleanup()

@@ -15,6 +15,19 @@ from collections.abc import Iterable
 
 
 CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
+UNION_ALPHA_FREE_MODEL = "opencode-go/union-alpha-free"
+
+# Console Go exposes Anthropic's native ``thinking`` request field rather than
+# OpenAI's ``reasoning_effort`` field.  Keep this mapping local to the Union
+# bridge so the OpenAI-routed Omen model does not receive Anthropic fields.
+_UNION_REASONING_BUDGETS = {
+    "minimal": 1_024,
+    "low": 1_024,
+    "medium": 2_048,
+    "high": 4_096,
+    "xhigh": 8_192,
+    "max": 16_384,
+}
 
 
 def _json_text(value) -> str:
@@ -156,6 +169,22 @@ def _append_message(messages: list[dict], item: dict) -> None:
     messages.append({"role": role, "content": _content_to_chat(item.get("content"))})
 
 
+def _union_thinking_from_responses(body: dict) -> dict | None:
+    """Translate Responses reasoning metadata to Anthropic's native thinking field."""
+    if body.get("model") != UNION_ALPHA_FREE_MODEL:
+        return None
+    reasoning = body.get("reasoning")
+    if not isinstance(reasoning, dict):
+        return None
+    effort = reasoning.get("effort")
+    if not isinstance(effort, str) or effort == "none":
+        return None
+    budget_tokens = _UNION_REASONING_BUDGETS.get(effort)
+    if budget_tokens is None:
+        return None
+    return {"type": "enabled", "budget_tokens": budget_tokens}
+
+
 def responses_to_chat_request(body: dict) -> tuple[dict, dict[str, tuple[str, str]]]:
     """Convert one Responses request to a Chat Completions request.
 
@@ -194,6 +223,10 @@ def responses_to_chat_request(body: dict) -> tuple[dict, dict[str, tuple[str, st
     if not messages:
         messages.append({"role": "user", "content": ""})
     chat["messages"] = messages
+
+    thinking = _union_thinking_from_responses(body)
+    if thinking is not None:
+        chat["thinking"] = thinking
 
     tools = body.get("tools")
     if isinstance(tools, list):

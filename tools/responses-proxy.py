@@ -65,6 +65,7 @@ DEFAULT_CONTROL_PLANE_BACKEND = "https://chatgpt.com/backend-api/codex"
 CONTROL_PLANE_PATH_PREFIX = "/v1/alpha"
 OPENCODE_SESSION_HEADER = "x-opencode-session"
 OPENCODE_MODEL_PREFIX = "opencode-go/"
+UNION_ALPHA_FREE_MODEL = "opencode-go/union-alpha-free"
 MUSE_MODEL_MARKER = "muse-spark-"
 DEEPSEEK_FLASH_MODEL_MARKER = "deepseek-flash"
 MUSE_COMPACTION_MODEL = "opencode-go/muse-spark-1.3-contributor"
@@ -137,6 +138,7 @@ class MuseCompactionState:
 _MUSE_COMPACTION_STATES: OrderedDict[str, MuseCompactionState] = OrderedDict()
 _MUSE_COMPACTION_LOCKS: dict[str, asyncio.Lock] = {}
 _MUSE_COMPACTION_TOKENS: OrderedDict[str, str] = OrderedDict()
+_UNION_PROCESS_SESSION = f"chat-{uuid.uuid4().hex}"
 
 
 def _header_value(headers: Mapping[str, str], name: str) -> str | None:
@@ -178,6 +180,19 @@ def _opaque_opencode_session(source: str) -> str:
     """Convert a native Codex identifier into an opaque stable provider ID."""
     digest = hashlib.sha256(f"opencode-session:{source}".encode()).hexdigest()
     return f"codex-{digest[:32]}"
+
+
+def is_union_alpha_free_model(model: object) -> bool:
+    """Return whether a request targets the Chat-session Union deployment."""
+    return model == UNION_ALPHA_FREE_MODEL
+
+
+def _session_for_model(model: object, source: str) -> str:
+    """Create the provider-session namespace expected by each OpenCode route."""
+    if is_union_alpha_free_model(model):
+        digest = hashlib.sha256(f"chat-session:{source}".encode()).hexdigest()
+        return f"chat-{digest[:32]}"
+    return _opaque_opencode_session(source)
 
 
 def _rotated_muse_provider_session(
@@ -252,7 +267,7 @@ def resolve_opencode_session(body: bytes, headers: Mapping[str, str]) -> str | N
         except Exception:
             native_id = None
         if native_id:
-            return _opaque_opencode_session(native_id)
+            return _session_for_model(obj.get("model"), native_id)
 
     for header_name in (
         "x-codex-parent-thread-id",
@@ -261,7 +276,7 @@ def resolve_opencode_session(body: bytes, headers: Mapping[str, str]) -> str | N
     ):
         native_id = _header_value(headers, header_name)
         if native_id:
-            return _opaque_opencode_session(native_id)
+            return _session_for_model(obj.get("model"), native_id)
 
     for key in (
         "thread_id",
@@ -273,15 +288,17 @@ def resolve_opencode_session(body: bytes, headers: Mapping[str, str]) -> str | N
     ):
         value = obj.get(key)
         if isinstance(value, str) and value.strip():
-            return _opaque_opencode_session(value.strip())
+            return _session_for_model(obj.get("model"), value.strip())
 
     metadata = obj.get("metadata")
     native_id = _find_stable_session_value(metadata)
     if native_id:
-        return _opaque_opencode_session(native_id)
+        return _session_for_model(obj.get("model"), native_id)
 
     # A stable process fallback still satisfies the provider contract when an
     # older Codex build exposes no native conversation identifier at all.
+    if is_union_alpha_free_model(obj.get("model")):
+        return _UNION_PROCESS_SESSION
     return _OPENCODE_PROCESS_SESSION
 
 

@@ -96,6 +96,21 @@ foreach ($entry in $models) {
             [void]$lines.Add("      ${propertyName}: $(Quote-YamlScalar $property.Value)")
         }
     }
+
+    $allowedOpenAIParamsProperty = $entry.route.PSObject.Properties['allowed_openai_params']
+    if ($null -ne $allowedOpenAIParamsProperty -and $null -ne $allowedOpenAIParamsProperty.Value) {
+        $allowedOpenAIParams = @($allowedOpenAIParamsProperty.Value)
+        if ($allowedOpenAIParams.Count -eq 0) {
+            throw "allowed_openai_params must not be empty: $id"
+        }
+        [void]$lines.Add('      allowed_openai_params:')
+        foreach ($allowedParam in $allowedOpenAIParams) {
+            if ([string]::IsNullOrWhiteSpace([string]$allowedParam)) {
+                throw "allowed_openai_params contains an empty value: $id"
+            }
+            [void]$lines.Add("        - $(Quote-YamlScalar $allowedParam)")
+        }
+    }
 }
 
 $template = [System.IO.File]::ReadAllText($TemplatePath)

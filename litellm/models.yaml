@@ -38,3 +38,5 @@ models:
       model: 'anthropic/union-alpha'
       api_base: 'https://opencode.ai/zen/go/v1/messages'
       api_key: 'os.environ/OPENCODEGO_API_KEY'
+      allowed_openai_params:
+        - 'thinking'
