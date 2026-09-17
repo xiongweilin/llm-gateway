@@ -11,10 +11,14 @@ Responses or Chat client
     -> 4101 LiteLLM routing core
     -> upstream
 
-4100 Responses request for a chat-mode model
+4100 Responses request for an ordinary chat-mode model
     -> 4102 Chat Completions forwarding hop
     -> 4101 LiteLLM routing core
     -> upstream
+
+Union Alpha Free Responses request
+    -> 4100 native Anthropic Messages bridge
+    -> OpenCode Go /v1/messages
 ```
 
 The 4100 ingress is the public protocol boundary. The 4102 process remains a
@@ -80,8 +84,11 @@ only `chat` models. The mode also selects the internal upstream protocol when
 The unified 4100 ingress accepts `POST /v1/responses` and
 `POST /v1/chat/completions`, plus `GET /v1/models` and the local health endpoint. It also
 exposes the narrowly scoped `/v1/alpha/*` compatibility extension required by
-the deployment. Responses requests for chat-mode models are converted to Chat
-Completions and sent through 4102.
+the deployment. Responses requests for ordinary chat-mode models are converted
+to Chat Completions and sent through 4102. Union Alpha Free is the deliberate
+exception: its Responses request is converted directly to the Anthropic
+Messages shape and sent to the provider's `/v1/messages` route, with a
+bounded Union-only transient retry and Responses-compatible SSE conversion.
 
 The 4102 Chat Completions process accepts `GET` or `POST /v1/chat/completions`,
 plus `GET /v1/models` and the local health endpoint. It

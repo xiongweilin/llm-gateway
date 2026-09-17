@@ -24,6 +24,7 @@ $GenerateRuntimeConfig = Join-Path $Root 'scripts\generate-runtime-config.ps1'
 $Python = Join-Path $Root 'litellm\.venv\Scripts\python.exe'
 $ServerEntry = Join-Path $Root 'litellm\run_server.py'
 $ResponsesIngress = Join-Path $Root 'tools\responses-proxy.py'
+$UnionAnthropicBridge = Join-Path $Root 'tools\union_anthropic_bridge.py'
 $ChatIngress = Join-Path $Root 'tools\chat-completions-proxy.py'
 $ChatBackend = 'http://127.0.0.1:4102'
 
@@ -224,6 +225,7 @@ foreach ($requiredPath in @(
     $Python,
     $ServerEntry,
     $ResponsesIngress,
+    $UnionAnthropicBridge,
     $ChatIngress,
     $ModelSource,
     $RuntimeTemplate,

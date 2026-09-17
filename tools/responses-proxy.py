@@ -4,7 +4,8 @@
 发送；LiteLLM(FastAPI) 不解压请求体，导致 model 字段解析失败（400
 model=None）。本代理在 127.0.0.1:4100 收取两种 OpenAI 协议请求，zstd 解压
 后转发到 LiteLLM（默认 127.0.0.1:4101），并流式回传 SSE 响应。Responses
-请求命中 chat mode 模型时，在此转换为 Chat Completions 并经 4102 转发。
+请求命中普通 chat mode 模型时，在此转换为 Chat Completions 并经 4102 转发；
+Union Alpha Free 使用本文件内的 native Anthropic Messages 例外路径。
 
 网页搜索等 control-plane 请求使用 `/v1/alpha/*`，不属于 LiteLLM 的模型
 API；这些路径旁路到 control-plane upstream，
@@ -54,6 +55,20 @@ except ModuleNotFoundError:  # pragma: no cover - direct file loading in tests
         chat_sse_to_responses_json,
         response_to_sse,
         responses_to_chat_request,
+    )
+
+try:
+    from union_anthropic_bridge import (
+        UnionAnthropicRoute,
+        handle_union_request,
+        load_union_anthropic_route,
+    )
+except ModuleNotFoundError:  # pragma: no cover - direct file loading in tests
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from union_anthropic_bridge import (
+        UnionAnthropicRoute,
+        handle_union_request,
+        load_union_anthropic_route,
     )
 
 log = logging.getLogger("responses-proxy")
@@ -2553,6 +2568,7 @@ async def handle(
     responses_models: set[str] | None = None,
     chat_models: set[str] | None = None,
     chat_backend: str = "http://127.0.0.1:4102",
+    union_anthropic_route: UnionAnthropicRoute | None = None,
 ):
     responses_models = responses_models or set()
     chat_models = chat_models or set()
@@ -2604,6 +2620,7 @@ async def handle(
     compaction_source_body: bytes | None = None
     compaction_source_session: str | None = None
     upstream_path = req.path
+    direct_union_to_anthropic = False
     tool_name_map: dict[str, tuple[str, str]] = {}
     prepared_stream_response: aiohttp.web.StreamResponse | None = None
 
@@ -2804,7 +2821,9 @@ async def handle(
                         },
                         status=400,
                     )
-                if is_union_alpha_free_model(model) and caller_stream:
+                if is_union_alpha_free_model(model) and union_anthropic_route is not None:
+                    direct_union_to_anthropic = True
+                elif is_union_alpha_free_model(model) and caller_stream:
                     # Console Go's Union deployment is reliable for buffered
                     # Chat responses but has returned empty/failed streaming
                     # responses. Keep the public Responses stream contract and
@@ -2815,6 +2834,45 @@ async def handle(
                     )
                 dec = json.dumps(chat_request, ensure_ascii=False, separators=(",", ":")).encode()
                 upstream_path = CHAT_COMPLETIONS_PATH
+
+            if direct_union_to_anthropic:
+                def rewrite_union_response(value: dict) -> object:
+                    return _rewrite_bridged_response(
+                        value,
+                        normalize_function_args,
+                        namespaced_tools,
+                        custom_tool_names,
+                        collaboration_compatibility,
+                    )
+
+                def rewrite_union_event(value: dict) -> int:
+                    changed = 0
+                    if collaboration_compatibility:
+                        changed += _force_plaintext_collaboration_calls(value)
+                    if namespaced_tools or custom_tool_names:
+                        changed += _rewrite_opencode_response_tools(
+                            value,
+                            namespaced_tools=namespaced_tools,
+                            custom_tool_names=custom_tool_names,
+                            custom_call_item_ids=custom_call_item_ids,
+                            custom_call_argument_buffers=custom_call_argument_buffers,
+                        )
+                    if normalize_function_args:
+                        changed += _normalize_function_call_arguments(value)
+                    return changed
+
+                return await handle_union_request(
+                    req,
+                    session,
+                    union_anthropic_route,
+                    chat_request,
+                    model if isinstance(model, str) else UNION_ALPHA_FREE_MODEL,
+                    tool_name_map,
+                    opencode_session,
+                    caller_stream,
+                    response_rewriter=rewrite_union_response,
+                    event_rewriter=rewrite_union_event,
+                )
         else:
             dec, opencode_session = ensure_opencode_session(dec, req.headers)
 
@@ -3108,6 +3166,11 @@ async def main() -> None:
     )
     chat_backend = sys.argv[5] if len(sys.argv) > 5 else "http://127.0.0.1:4102"
     responses_models, chat_models = load_protocol_models(config_path)
+    try:
+        union_anthropic_route = load_union_anthropic_route(config_path)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Union native route could not be loaded: %s", type(exc).__name__)
+        union_anthropic_route = None
     unified_models = responses_models | chat_models
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     # 桌面端打开会话会发送完整历史（+工具 schema），超过 aiohttp 默认
@@ -3129,6 +3192,7 @@ async def main() -> None:
             responses_models,
             chat_models,
             chat_backend,
+            union_anthropic_route,
         ),
     )
     runner = aiohttp.web.AppRunner(app)
