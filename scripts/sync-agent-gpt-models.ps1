@@ -1,7 +1,7 @@
 # 同步客户端模型目录。
 #
 # 默认行为：
-# - 运行时缓存和显示目录保留三个官方 GPT 模型，
+# - 运行时缓存和显示目录保留两个官方 GPT 模型，
 #   并追加受控的 supplemental models；
 # - 清理其他模型，保持固定顺序并去重；
 # - 只在生成并校验完整内容后替换目标文件，失败不会破坏现有配置；
@@ -16,24 +16,22 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# 所有目录和网关统一使用这三个官方模型；顺序也是对外显示和路由顺序。
+# 2026-09-23：模型列表收敛为三个 —— gpt-6-sol、gpt-6-luna、
+# opencode-go/deepseek-flash；顺序也是对外显示和路由顺序。
+# 其余模型定义保留为注释，恢复时取消注释并加回集合。
 $AllowedModelSlugs = @(
-    "gpt-5.6-sol",
-    "gpt-5.6-terra",
-    "gpt-5.6-luna"
+    "gpt-6-sol",
+    "gpt-6-luna"
+    # "gpt-5.6-sol",
+    # "gpt-5.6-terra",
+    # "gpt-5.6-luna"
 )
 $OfficialModelContextWindowOverrides = @{
-    "gpt-5.6-sol" = 1050000
+    # 自 gpt-5.6-sol 沿用，待官方目录刷新后复核。
+    "gpt-6-sol" = 1050000
+    # "gpt-5.6-sol" = 1050000
 }
 $SupplementalModelDefinitions = [ordered]@{
-    "opencode-go/muse-spark-1.3-contributor" = [ordered]@{
-        DisplayName = "Muse Spark 1.3 Contributor (OpenCode Go)"
-        Description = "OpenCode Go contributor model routed through the local LiteLLM gateway."
-        Priority = 4
-        ContextWindow = 1048576
-        AutoCompactTokenLimit = 900000
-        UseResponsesLite = $false
-    }
     "opencode-go/deepseek-flash" = [ordered]@{
         DisplayName = "DeepSeek Flash (OpenCode Go)"
         Description = "OpenCode Go DeepSeek Flash model routed through the local LiteLLM gateway."
@@ -42,20 +40,29 @@ $SupplementalModelDefinitions = [ordered]@{
         AutoCompactTokenLimit = 900000
         UseResponsesLite = $false
     }
-    "opencode-go/omen-alpha" = [ordered]@{
-        DisplayName = "Omen Alpha (OpenCode Go)"
-        Description = "OpenCode Go Omen Alpha model routed through the local LiteLLM gateway."
-        Priority = 5
-        ContextWindow = 500000
-    }
-    "opencode-go/union-alpha-free" = [ordered]@{
-        DisplayName = "Union Alpha Free (OpenCode Go)"
-        Description = "OpenCode Go Union Alpha Free model routed through the local LiteLLM gateway."
-        Priority = 6
-        # Upstream context limit has not been published in the supplied model entry.
-        # Keep the local catalog conservative until a real protocol probe confirms it.
-        ContextWindow = 400000
-    }
+    # --- 以下模型已停用（2026-09-23），恢复时取消注释 ---
+    # "opencode-go/muse-spark-1.3-contributor" = [ordered]@{
+    #     DisplayName = "Muse Spark 1.3 Contributor (OpenCode Go)"
+    #     Description = "OpenCode Go contributor model routed through the local LiteLLM gateway."
+    #     Priority = 4
+    #     ContextWindow = 1048576
+    #     AutoCompactTokenLimit = 900000
+    #     UseResponsesLite = $false
+    # }
+    # "opencode-go/omen-alpha" = [ordered]@{
+    #     DisplayName = "Omen Alpha (OpenCode Go)"
+    #     Description = "OpenCode Go Omen Alpha model routed through the local LiteLLM gateway."
+    #     Priority = 5
+    #     ContextWindow = 500000
+    # }
+    # "opencode-go/union-alpha-free" = [ordered]@{
+    #     DisplayName = "Union Alpha Free (OpenCode Go)"
+    #     Description = "OpenCode Go Union Alpha Free model routed through the local LiteLLM gateway."
+    #     Priority = 6
+    #     # Upstream context limit has not been published in the supplied model entry.
+    #     # Keep the local catalog conservative until a real protocol probe confirms it.
+    #     ContextWindow = 400000
+    # }
 }
 $SupplementalModelSlugs = @($SupplementalModelDefinitions.Keys)
 $ManagedModelSlugs = @($AllowedModelSlugs + $SupplementalModelSlugs)
@@ -184,7 +191,7 @@ function Get-ManagedCatalogModels {
 
         if ($null -eq $supplemental) {
             $template = @(
-                $existingModels | Where-Object { [string]$_.slug -eq "gpt-5.6-luna" }
+                $existingModels | Where-Object { [string]$_.slug -eq "gpt-6-luna" }
             ) | Select-Object -First 1
             if ($null -eq $template) {
                 throw "无法为 OpenCode Go 模型找到 Codex 元数据模板: $supplementalSlug"

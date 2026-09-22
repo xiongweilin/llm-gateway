@@ -55,7 +55,7 @@ $ControlRoot = 'D:\agent\control-plane'
 $CodexHome = Join-Path $env:USERPROFILE '.codex'
 $CodexConfig = Join-Path $CodexHome 'config.toml'
 $CodexModelCache = Join-Path $CodexHome 'models_cache.json'
-$OfficialModel = 'gpt-5.6-luna'
+$OfficialModel = 'gpt-6-luna'
 $CodexBaseUrl = 'http://127.0.0.1:4100/v1'
 $LiteLlmBaseUrl = 'http://127.0.0.1:4101/v1'
 $GatewayTask = 'LiteLLM-Agent-Gateway'
@@ -118,6 +118,14 @@ function ReplaceOnce([string]$Path,[string]$Old,[string]$New) {
     if($first -lt 0){if($text.Contains($New,[StringComparison]::Ordinal)){return};Fail "expected anchor missing: $Path"}
     if($first -ne $text.LastIndexOf($Old,[StringComparison]::Ordinal)){Fail "expected anchor is not unique: $Path"}
     $null=SetText $Path $text ($text.Remove($first,$Old.Length).Insert($first,$New))
+}
+function NormalizeControlConfigModels([string]$Path) {
+    # 把 control-plane 默认模型统一到 gpt-6-luna（幂等：已是目标值时不改动；
+    # 兼容 gpt-5.6-luna / gpt-6-luna 以及带 codex/ 前缀的历史写法）。
+    $text=ReadText $Path
+    $pattern='(?m)^([ \t]*(?:diagnosis_model|execution_model): str = ")(?:codex/)?gpt-[0-9.]+-luna(")$'
+    $updated=[regex]::Replace($text,$pattern,{param($m) $m.Groups[1].Value+'gpt-6-luna'+$m.Groups[2].Value})
+    $null=SetText $Path $text $updated
 }
 function TaskInfo([string]$Name) {
     $t=Get-ScheduledTask -TaskName $Name -TaskPath '\' -ErrorAction Stop
@@ -272,8 +280,7 @@ function SetSection([string]$Text,[string]$Section,[string[]]$Keys,[hashtable]$V
     $r=[string]::Join($nl,$lines.ToArray());if($final){$r+=$nl};return $r
 }
 function UpdatePersistentConfig{
-    ReplaceOnce $ControlConfigPy 'diagnosis_model: str = "codex/gpt-5.6-luna"' 'diagnosis_model: str = "gpt-5.6-luna"'
-    ReplaceOnce $ControlConfigPy 'execution_model: str = "codex/gpt-5.6-luna"' 'execution_model: str = "gpt-5.6-luna"'
+    NormalizeControlConfigModels $ControlConfigPy
     ReplaceOnce $ControlAlertPy '        state = await controller.step(controller_id, policy)' ("        decision = await policy.select(state)"+[Environment]::NewLine+"        state = await controller.apply(decision)")
     $codexCli=(ResolveCodexExe)-replace '\\','/'
     $before=ReadText $ControlConfig;$t=SetSection $before 'model' @('diagnosis_model','execution_model','gateway_base_url','codex_cli') @{diagnosis_model=$OfficialModel;execution_model=$OfficialModel;gateway_base_url=$LiteLlmBaseUrl;codex_cli=$codexCli};$t=SetSection $t 'agent' @('model','gateway_base_url') @{model=$OfficialModel;gateway_base_url=$LiteLlmBaseUrl};$null=SetText $ControlConfig $before $t
@@ -306,8 +313,8 @@ try{
     if($gatewayTaskBefore.Action-notmatch'(?i)watch-agent-gateway\.ps1'){Fail 'gateway task action mismatch: watchdog required'};if($controlTaskBefore.Action-notmatch'(?i)Run-ControlPlaneHidden\.vbs'){Fail 'control task action mismatch'}
     $configSource=ReadText $ControlConfigPy
     if (-not (
-        $configSource.Contains('diagnosis_model: str = "gpt-5.6-luna"') -and
-        $configSource.Contains('execution_model: str = "gpt-5.6-luna"')
+        $configSource.Contains('diagnosis_model: str = "gpt-6-luna"') -and
+        $configSource.Contains('execution_model: str = "gpt-6-luna"')
     )) { AssertCleanTarget $ControlRoot 'src/control_plane/config.py' }
     $alertSource=ReadText $ControlAlertPy
     if (-not (
@@ -319,5 +326,5 @@ try{
     $stage='config';UpdatePersistentConfig
     $stage='gateway';if(-not $gatewayWasReady -or -not $gatewayModelsMatched){$gatewayTouched=$true;MarkChanged (Join-Path $GatewayRoot 'litellm\config.runtime.yaml');TaskEnd $GatewayTask;StopGatewayProcesses;TaskEnable $GatewayTask $true;TaskRun $GatewayTask;WaitGateway 180}elseif(-not $gatewayTaskBefore.Enabled){$gatewayTouched=$true;TaskEnable $GatewayTask $true};GatewayProbe;Say 'LiteLLM protocol ingress and routing validation passed'
     $stage='codex';CodexProbe;Say 'Codex 经 4100 网关验证通过'
-    $stage='control';PythonConfigProbe;if(-not$controlWasLive-or$changed.Contains($ControlConfigPy)-or$changed.Contains($ControlAlertPy)-or$changed.Contains($ControlConfig)){$controlTouched=$true;TaskEnd $ControlTask;StopControlProcess;TaskEnable $ControlTask $true;TaskRun $ControlTask;WaitControl 120};Say 'control-plane 配置与 liveness 验证通过';Say '完成：网关任务已启用，模型统一为 gpt-5.6-luna';$parent=[IO.Path]::GetFullPath([IO.Path]::GetTempPath());$full=[IO.Path]::GetFullPath($tx);if($full.StartsWith($parent,[StringComparison]::OrdinalIgnoreCase)-and(Split-Path $full -Leaf).StartsWith('ratio-luna-gateway-')){Remove-Item -LiteralPath $full -Recurse -Force};exit 0
+    $stage='control';PythonConfigProbe;if(-not$controlWasLive-or$changed.Contains($ControlConfigPy)-or$changed.Contains($ControlAlertPy)-or$changed.Contains($ControlConfig)){$controlTouched=$true;TaskEnd $ControlTask;StopControlProcess;TaskEnable $ControlTask $true;TaskRun $ControlTask;WaitControl 120};Say 'control-plane 配置与 liveness 验证通过';Say '完成：网关任务已启用，模型统一为 gpt-6-luna';$parent=[IO.Path]::GetFullPath([IO.Path]::GetTempPath());$full=[IO.Path]::GetFullPath($tx);if($full.StartsWith($parent,[StringComparison]::OrdinalIgnoreCase)-and(Split-Path $full -Leaf).StartsWith('ratio-luna-gateway-')){Remove-Item -LiteralPath $full -Recurse -Force};exit 0
 }catch{$detail=([string]$_.Exception.Message)-replace '[\r\n]+',' ';Say "失败，自动回滚（阶段=$stage，错误类型=$($_.Exception.GetType().Name)，原因=$detail）";$ok=Rollback;if($ok){Say '自动回滚完成，已恢复执行前文件与任务状态'}else{Write-Error "自动回滚未完全确认（$($rollbackErrors -join ', ')）；保留事务目录：$tx"};exit $(if($ok){1}else{2})}

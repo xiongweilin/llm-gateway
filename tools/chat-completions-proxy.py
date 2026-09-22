@@ -88,9 +88,11 @@ def _opaque_session(source: str) -> str:
 
 def _model_requires_session(model: object) -> bool:
     """Return whether the configured chat deployment needs a session header."""
+    # 2026-09-23：opencode-go/omen-alpha 与 opencode-go/union-alpha-free 已从
+    # 模型列表停用；恢复这两个模型时必须同时恢复下面的名单。
     return model in {
-        "opencode-go/omen-alpha",
-        "opencode-go/union-alpha-free",
+        # "opencode-go/omen-alpha",
+        # "opencode-go/union-alpha-free",
     }
 
 
