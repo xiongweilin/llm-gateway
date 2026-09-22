@@ -281,7 +281,6 @@ function SetSection([string]$Text,[string]$Section,[string[]]$Keys,[hashtable]$V
 }
 function UpdatePersistentConfig{
     NormalizeControlConfigModels $ControlConfigPy
-    ReplaceOnce $ControlAlertPy '        state = await controller.step(controller_id, policy)' ("        decision = await policy.select(state)"+[Environment]::NewLine+"        state = await controller.apply(decision)")
     $codexCli=(ResolveCodexExe)-replace '\\','/'
     $before=ReadText $ControlConfig;$t=SetSection $before 'model' @('diagnosis_model','execution_model','gateway_base_url','codex_cli') @{diagnosis_model=$OfficialModel;execution_model=$OfficialModel;gateway_base_url=$LiteLlmBaseUrl;codex_cli=$codexCli};$t=SetSection $t 'agent' @('model','gateway_base_url') @{model=$OfficialModel;gateway_base_url=$LiteLlmBaseUrl};$null=SetText $ControlConfig $before $t
     SetTopLevelCodexRouting
@@ -316,11 +315,6 @@ try{
         $configSource.Contains('diagnosis_model: str = "gpt-6-luna"') -and
         $configSource.Contains('execution_model: str = "gpt-6-luna"')
     )) { AssertCleanTarget $ControlRoot 'src/control_plane/config.py' }
-    $alertSource=ReadText $ControlAlertPy
-    if (-not (
-        $alertSource.Contains('        decision = await policy.select(state)') -and
-        $alertSource.Contains('        state = await controller.apply(decision)')
-    )) { AssertCleanTarget $ControlRoot 'src/control_plane/alert_policy.py' }
     AssertPortSafe 4100 'gateway';AssertPortSafe 4101 'gateway';AssertPortSafe 4102 'gateway';AssertPortSafe 18083 'control';$gatewayWasReady=GatewayHealthy;$gatewayModelsMatched=if($gatewayWasReady){GatewayModelsMatch}else{$false};$controlWasLive=(Status 'http://127.0.0.1:18083/live')-eq200
     Snapshot $CodexConfig 'codex.config.toml';Snapshot $ControlConfigPy 'control.config.py';Snapshot $ControlAlertPy 'control.alert_policy.py';Snapshot $ControlConfig 'control_plane.toml';Snapshot (Join-Path $GatewayRoot 'litellm\config.runtime.yaml') 'gateway.config.runtime.yaml';Snapshot (Join-Path $CodexHome 'models.filtered.json') 'codex.models.filtered.json';Snapshot (Join-Path $GatewayRoot 'litellm\.litellm-core.pid') 'gateway.core.pid';Snapshot (Join-Path $GatewayRoot 'litellm\.responses-ingress.pid') 'gateway.responses.pid';Snapshot (Join-Path $GatewayRoot 'litellm\.chat-completions-ingress.pid') 'gateway.chat.pid'
     $stage='config';UpdatePersistentConfig
