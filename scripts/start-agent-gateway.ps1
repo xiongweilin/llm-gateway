@@ -209,8 +209,8 @@ function Get-CatalogIds {
 function Assert-CatalogMatches {
     param(
         [Parameter(Mandatory)][string]$Label,
-        [Parameter(Mandatory)][string[]]$Actual,
-        [Parameter(Mandatory)][string[]]$Expected
+        [Parameter(Mandatory)][AllowNull()][AllowEmptyCollection()][string[]]$Actual,
+        [Parameter(Mandatory)][AllowNull()][AllowEmptyCollection()][string[]]$Expected
     )
 
     $actualKey = (@($Actual | Sort-Object -Unique) -join "`n")
