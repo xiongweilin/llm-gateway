@@ -145,15 +145,17 @@ function Native([string[]]$Args,[int]$Limit=30,[int[]]$Allowed=@(0)) {
     try{if(-not $p.Start()){Fail 'native command did not start'};$p.BeginOutputReadLine();$p.BeginErrorReadLine();if(-not $p.WaitForExit(([int](Remaining $Limit)*1000))){try{$p.Kill($true)}catch{};Fail 'native command timeout'};$ec=[int]$p.ExitCode}finally{$p.Dispose()}
     if($Allowed -notcontains $ec){Fail "native command failed: exit=$ec"}
 }
-function TaskRun([string]$Name){
+function TaskRun([string]$Name,[scriptblock]$Ready=$null){
     $before=(Get-ScheduledTaskInfo -TaskName $Name -TaskPath '\' -ErrorAction Stop).LastRunTime
     for($attempt=1;$attempt-le2;$attempt++){
         Native @('/Run','/TN',('\'+$Name)) 30
-        $end=[DateTime]::UtcNow.AddSeconds(10)
+        # 宽限 45 秒：/Run 返回后任务状态可能先显示 Ready，子进程要几秒后才进入 Running。
+        $end=[DateTime]::UtcNow.AddSeconds(45)
         while([DateTime]::UtcNow-lt$end){
             $task=Get-ScheduledTask -TaskName $Name -TaskPath '\' -ErrorAction Stop
             $info=Get-ScheduledTaskInfo -TaskName $Name -TaskPath '\' -ErrorAction Stop
             if([string]$task.State-eq'Running'-or$info.LastRunTime-gt$before){return}
+            if($null-ne$Ready-and(& $Ready)){return}
             Start-Sleep -Milliseconds 500
         }
     }
@@ -318,7 +320,7 @@ try{
     AssertPortSafe 4100 'gateway';AssertPortSafe 4101 'gateway';AssertPortSafe 4102 'gateway';AssertPortSafe 18083 'control';$gatewayWasReady=GatewayHealthy;$gatewayModelsMatched=if($gatewayWasReady){GatewayModelsMatch}else{$false};$controlWasLive=(Status 'http://127.0.0.1:18083/live')-eq200
     Snapshot $CodexConfig 'codex.config.toml';Snapshot $ControlConfigPy 'control.config.py';Snapshot $ControlAlertPy 'control.alert_policy.py';Snapshot $ControlConfig 'control_plane.toml';Snapshot (Join-Path $GatewayRoot 'litellm\config.runtime.yaml') 'gateway.config.runtime.yaml';Snapshot (Join-Path $CodexHome 'models.filtered.json') 'codex.models.filtered.json';Snapshot (Join-Path $GatewayRoot 'litellm\.litellm-core.pid') 'gateway.core.pid';Snapshot (Join-Path $GatewayRoot 'litellm\.responses-ingress.pid') 'gateway.responses.pid';Snapshot (Join-Path $GatewayRoot 'litellm\.chat-completions-ingress.pid') 'gateway.chat.pid'
     $stage='config';UpdatePersistentConfig
-    $stage='gateway';if(-not $gatewayWasReady -or -not $gatewayModelsMatched){$gatewayTouched=$true;MarkChanged (Join-Path $GatewayRoot 'litellm\config.runtime.yaml');TaskEnd $GatewayTask;StopGatewayProcesses;TaskEnable $GatewayTask $true;TaskRun $GatewayTask;WaitGateway 180}elseif(-not $gatewayTaskBefore.Enabled){$gatewayTouched=$true;TaskEnable $GatewayTask $true};GatewayProbe;Say 'LiteLLM protocol ingress and routing validation passed'
+    $stage='gateway';if(-not $gatewayWasReady -or -not $gatewayModelsMatched){$gatewayTouched=$true;MarkChanged (Join-Path $GatewayRoot 'litellm\config.runtime.yaml');TaskEnd $GatewayTask;StopGatewayProcesses;TaskEnable $GatewayTask $true;TaskRun $GatewayTask { GatewayHealthy };WaitGateway 180}elseif(-not $gatewayTaskBefore.Enabled){$gatewayTouched=$true;TaskEnable $GatewayTask $true};GatewayProbe;Say 'LiteLLM protocol ingress and routing validation passed'
     $stage='codex';CodexProbe;Say 'Codex 经 4100 网关验证通过'
-    $stage='control';PythonConfigProbe;if(-not$controlWasLive-or$changed.Contains($ControlConfigPy)-or$changed.Contains($ControlAlertPy)-or$changed.Contains($ControlConfig)){$controlTouched=$true;TaskEnd $ControlTask;StopControlProcess;TaskEnable $ControlTask $true;TaskRun $ControlTask;WaitControl 120};Say 'control-plane 配置与 liveness 验证通过';Say '完成：网关任务已启用，模型统一为 gpt-6-luna';$parent=[IO.Path]::GetFullPath([IO.Path]::GetTempPath());$full=[IO.Path]::GetFullPath($tx);if($full.StartsWith($parent,[StringComparison]::OrdinalIgnoreCase)-and(Split-Path $full -Leaf).StartsWith('ratio-luna-gateway-')){Remove-Item -LiteralPath $full -Recurse -Force};exit 0
+    $stage='control';PythonConfigProbe;if(-not$controlWasLive-or$changed.Contains($ControlConfigPy)-or$changed.Contains($ControlAlertPy)-or$changed.Contains($ControlConfig)){$controlTouched=$true;TaskEnd $ControlTask;StopControlProcess;TaskEnable $ControlTask $true;TaskRun $ControlTask { (Status 'http://127.0.0.1:18083/live') -eq 200 };WaitControl 120};Say 'control-plane 配置与 liveness 验证通过';Say '完成：网关任务已启用，模型统一为 gpt-6-luna';$parent=[IO.Path]::GetFullPath([IO.Path]::GetTempPath());$full=[IO.Path]::GetFullPath($tx);if($full.StartsWith($parent,[StringComparison]::OrdinalIgnoreCase)-and(Split-Path $full -Leaf).StartsWith('ratio-luna-gateway-')){Remove-Item -LiteralPath $full -Recurse -Force};exit 0
 }catch{$detail=([string]$_.Exception.Message)-replace '[\r\n]+',' ';Say "失败，自动回滚（阶段=$stage，错误类型=$($_.Exception.GetType().Name)，原因=$detail）";$ok=Rollback;if($ok){Say '自动回滚完成，已恢复执行前文件与任务状态'}else{Write-Error "自动回滚未完全确认（$($rollbackErrors -join ', ')）；保留事务目录：$tx"};exit $(if($ok){1}else{2})}
