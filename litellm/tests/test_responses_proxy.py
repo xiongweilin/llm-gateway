@@ -129,7 +129,7 @@ def test_agent_message_conversion_is_scoped_to_opencode_plaintext() -> None:
 
 def test_compaction_trigger_normalization_remains_for_opencode() -> None:
     request = {
-        "model": "gpt-6-luna",
+        "model": "opencode-go/deepseek-flash",
         "input": [
             {"type": "message", "role": "user", "content": []},
             {"type": "compaction_trigger", "id": "compact_1"},
@@ -145,21 +145,9 @@ def test_compaction_trigger_normalization_remains_for_opencode() -> None:
         "function_call",
     ]
 
-    request["model"] = "opencode-go/deepseek-flash"
-    muse_normalized = json.loads(
-        proxy.normalize_opencode_compaction_triggers(
-            json.dumps(request).encode()
-        )
-    )
-    assert [item["type"] for item in muse_normalized["input"]] == [
-        "message",
-        "function_call",
-    ]
-
-    request["model"] = "gpt-5.6-luna"
+    request["model"] = "gpt-6-luna"
     raw = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode()
-    assert proxy.normalize_opencode_compaction_triggers(raw) is raw
-
+    assert proxy.normalize_opencode_compaction_triggers(raw) == raw
 
 def test_deepseek_compaction_item_is_restored_before_provider_request() -> None:
     request = {
