@@ -1413,9 +1413,9 @@ def normalize_opencode_compaction_triggers(body: bytes) -> bytes:
 
     ``compaction_trigger`` is an internal Codex Responses item.  It is useful
     to Codex's own context-management path, but Console Go validates the
-    public input item union and rejects it.  Muse compaction requests are
+    public input item union and rejects it. DeepSeek compaction requests are
     handled before the upstream call; this sanitizer remains the provider
-    boundary fallback for other OpenCode Go routes.
+    boundary fallback for OpenCode Go routes.
     """
     try:
         obj = json.loads(body)
