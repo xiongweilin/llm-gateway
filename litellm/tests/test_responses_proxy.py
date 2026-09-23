@@ -62,7 +62,7 @@ def test_collaboration_request_uses_plaintext_alias() -> None:
 
 def test_collaboration_request_repairs_flattened_call_name() -> None:
     request = {
-        "model": "opencode-go/muse-spark-1.3-contributor",
+        "model": "opencode-go/deepseek-flash",
         "input": [
             {
                 "type": "function_call",
@@ -81,7 +81,7 @@ def test_collaboration_request_repairs_flattened_call_name() -> None:
 
 def test_collaboration_request_repairs_unqualified_call_name() -> None:
     request = {
-        "model": "opencode-go/muse-spark-1.3-contributor",
+        "model": "opencode-go/deepseek-flash",
         "input": [
             {
                 "type": "function_call",
@@ -129,7 +129,7 @@ def test_agent_message_conversion_is_scoped_to_opencode_plaintext() -> None:
 
 def test_compaction_trigger_normalization_remains_for_opencode() -> None:
     request = {
-        "model": "opencode-go/omen-alpha",
+        "model": "opencode-go/deepseek-flash",
         "input": [
             {"type": "message", "role": "user", "content": []},
             {"type": "compaction_trigger", "id": "compact_1"},
@@ -145,25 +145,13 @@ def test_compaction_trigger_normalization_remains_for_opencode() -> None:
         "function_call",
     ]
 
-    request["model"] = "opencode-go/muse-spark-1.3-contributor"
-    muse_normalized = json.loads(
-        proxy.normalize_opencode_compaction_triggers(
-            json.dumps(request).encode()
-        )
-    )
-    assert [item["type"] for item in muse_normalized["input"]] == [
-        "message",
-        "function_call",
-    ]
-
-    request["model"] = "gpt-5.6-luna"
+    request["model"] = "gpt-6-luna"
     raw = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode()
-    assert proxy.normalize_opencode_compaction_triggers(raw) is raw
+    assert proxy.normalize_opencode_compaction_triggers(raw) == raw
 
-
-def test_muse_compaction_item_is_restored_before_provider_request() -> None:
+def test_deepseek_compaction_item_is_restored_before_provider_request() -> None:
     request = {
-        "model": "opencode-go/muse-spark-1.3-contributor",
+        "model": "opencode-go/deepseek-flash",
         "input": [
             {"type": "message", "role": "user", "content": []},
             {
@@ -186,7 +174,7 @@ def test_muse_compaction_item_is_restored_before_provider_request() -> None:
         ]
         assert "Gateway-generated historical checkpoint" in normalized["input"][1]["content"][0]["text"]
 
-        request["model"] = "opencode-go/omen-alpha"
+        request["model"] = "gpt-6-luna"
         raw = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode()
         assert proxy.normalize_muse_compaction_items(raw) is raw
     finally:
@@ -232,9 +220,9 @@ def test_deepseek_flash_reuses_muse_agent_loop_and_checkpoint_compatibility() ->
         proxy._MUSE_COMPACTION_TOKENS.update(old_tokens)
 
 
-def test_muse_compaction_response_contains_one_protocol_item() -> None:
+def test_deepseek_compaction_response_contains_one_protocol_item() -> None:
     request = {
-        "model": "opencode-go/muse-spark-1.3-contributor",
+        "model": "opencode-go/deepseek-flash",
         "input": [
             {
                 "type": "message",
@@ -302,9 +290,9 @@ def test_muse_compaction_response_contains_one_protocol_item() -> None:
         proxy._MUSE_COMPACTION_TOKENS.update(old_tokens)
 
 
-def test_muse_compaction_trigger_detection_is_stable() -> None:
+def test_deepseek_compaction_trigger_detection_is_stable() -> None:
     request = {
-        "model": "opencode-go/muse-spark-1.3-contributor",
+        "model": "opencode-go/deepseek-flash",
         "input": [
             {"type": "message", "role": "user", "content": []},
             {"type": "message", "role": "assistant", "content": []},
@@ -316,9 +304,9 @@ def test_muse_compaction_trigger_detection_is_stable() -> None:
     assert proxy._has_compaction_trigger(request)
 
 
-def test_muse_compaction_checkpoint_rewrites_history_and_reuses_state() -> None:
+def test_deepseek_compaction_checkpoint_rewrites_history_and_reuses_state() -> None:
     request = {
-        "model": "opencode-go/muse-spark-1.3-contributor",
+        "model": "opencode-go/deepseek-flash",
         "input": [
             {"type": "message", "role": "user", "content": "objective"},
             *[
@@ -390,7 +378,7 @@ def test_muse_compaction_checkpoint_rewrites_history_and_reuses_state() -> None:
         proxy._MUSE_COMPACTION_LOCKS.update(old_locks)
 
 
-def test_muse_compaction_waiter_unwraps_body() -> None:
+def test_deepseek_compaction_waiter_unwraps_body() -> None:
     async def run_waiter():
         task = asyncio.create_task(asyncio.sleep(0, result=(b"compacted", True, "session-2")))
         return await proxy._await_muse_compaction(task, None, False)
@@ -403,7 +391,7 @@ def test_muse_compaction_waiter_unwraps_body() -> None:
 
 def test_additional_tools_are_lifted_for_opencode() -> None:
     request = {
-        "model": "opencode-go/muse-spark-1.3-contributor",
+        "model": "opencode-go/deepseek-flash",
         "input": [
             {
                 "type": "additional_tools",
@@ -452,7 +440,7 @@ def test_additional_tools_are_unchanged_for_chatgpt() -> None:
 
 def test_search_content_types_are_kept_only_for_preview_tools() -> None:
     request = {
-        "model": "opencode-go/muse-spark-1.3-contributor",
+        "model": "opencode-go/deepseek-flash",
         "tools": [
             {
                 "type": "web_search",
@@ -516,7 +504,7 @@ def test_search_content_types_are_unchanged_for_chatgpt() -> None:
 
 def test_opencode_tool_descriptions_are_nonempty_and_scoped() -> None:
     request = {
-        "model": "opencode-go/muse-spark-1.3-contributor",
+        "model": "opencode-go/deepseek-flash",
         "tools": [
             {
                 "type": "namespace",
@@ -831,7 +819,7 @@ def test_tool_schema_normalization_keeps_valid_request_unchanged() -> None:
 
 def test_tool_schema_required_normalization_is_scoped_to_opencode() -> None:
     request = {
-        "model": "opencode-go/muse-spark-1.3-contributor",
+        "model": "opencode-go/deepseek-flash",
         "tools": [
             {
                 "type": "function",
@@ -857,7 +845,7 @@ def test_tool_schema_required_normalization_is_scoped_to_opencode() -> None:
 
 def test_custom_tool_declarations_are_bridged_for_opencode() -> None:
     request = {
-        "model": "opencode-go/muse-spark-1.3-contributor",
+        "model": "opencode-go/deepseek-flash",
         "tools": [
             {"type": "custom", "name": "exec", "description": "Run JavaScript."},
             {"type": "function", "name": "read_file", "parameters": {"properties": {}}},
@@ -890,40 +878,6 @@ def test_custom_tool_declarations_are_bridged_for_opencode() -> None:
     assert proxy.normalize_opencode_custom_tools(raw) is raw
 
 
-def test_union_custom_exec_uses_provider_safe_code_argument() -> None:
-    request = {
-        "model": "opencode-go/union-alpha-free",
-        "tools": [
-            {
-                "type": "namespace",
-                "name": "functions",
-                "tools": [
-                    {"type": "custom", "name": "exec", "description": "Run code."}
-                ],
-            }
-        ],
-        "input": [
-            {
-                "type": "custom_tool_call",
-                "namespace": "functions",
-                "name": "exec",
-                "custom_tool_call_id": "call_exec",
-                "input": "return 1;",
-            }
-        ],
-    }
-
-    normalized = json.loads(
-        proxy.normalize_opencode_custom_tools(json.dumps(request).encode())
-    )
-
-    declaration = normalized["tools"][0]["tools"][0]
-    assert declaration["type"] == "function"
-    assert list(declaration["parameters"]["properties"]) == ["code"]
-    assert declaration["parameters"]["required"] == ["code"]
-    assert normalized["input"][0]["type"] == "function_call"
-    assert json.loads(normalized["input"][0]["arguments"]) == {"code": "return 1;"}
-
 
 def test_custom_exec_json_input_is_restored_to_javascript() -> None:
     assert proxy._custom_input_from_arguments(
@@ -946,7 +900,7 @@ def test_custom_exec_json_input_is_restored_to_javascript() -> None:
 
 def test_namespaced_calls_are_repaired_for_opencode() -> None:
     request = {
-        "model": "opencode-go/muse-spark-1.3-contributor",
+        "model": "opencode-go/deepseek-flash",
         "tools": [
             {
                 "type": "namespace",
@@ -1253,7 +1207,7 @@ def test_compatibility_features_are_shape_driven() -> None:
 
 def test_opencode_session_is_injected_without_touching_gpt_requests() -> None:
     muse = {
-        "model": "opencode-go/muse-spark-1.3-contributor",
+        "model": "opencode-go/deepseek-flash",
         "input": [],
         "extra_headers": {"x-client-header": "keep"},
     }
@@ -1270,12 +1224,12 @@ def test_opencode_session_is_injected_without_touching_gpt_requests() -> None:
 
     codex_metadata = {"threadId": "thread-1", "turnId": "turn-1"}
     first_body, first_session = proxy.ensure_opencode_session(
-        json.dumps({"model": "opencode-go/muse-spark-1.3-contributor"}).encode(),
+        json.dumps({"model": "opencode-go/deepseek-flash"}).encode(),
         {"x-codex-turn-metadata": json.dumps(codex_metadata)},
     )
     codex_metadata["turnId"] = "turn-2"
     _, second_session = proxy.ensure_opencode_session(
-        json.dumps({"model": "opencode-go/muse-spark-1.3-contributor"}).encode(),
+        json.dumps({"model": "opencode-go/deepseek-flash"}).encode(),
         {"x-codex-turn-metadata": json.dumps(codex_metadata)},
     )
     assert json.loads(first_body)["extra_headers"]["x-opencode-session"] == first_session
@@ -1290,27 +1244,10 @@ def test_opencode_session_is_injected_without_touching_gpt_requests() -> None:
     assert gpt_session is None
 
 
-def test_union_session_uses_chat_compatible_namespace_without_muse_handling() -> None:
-    union = {"model": "opencode-go/union-alpha-free", "input": []}
-    first_body, first_session = proxy.ensure_opencode_session(
-        json.dumps(union).encode(),
-        {"x-codex-turn-metadata": json.dumps({"threadId": "union-thread-1", "turnId": "turn-1"})},
-    )
-    second_body, second_session = proxy.ensure_opencode_session(
-        json.dumps(union).encode(),
-        {"x-codex-turn-metadata": json.dumps({"threadId": "union-thread-1", "turnId": "turn-2"})},
-    )
-
-    assert first_session and first_session.startswith("chat-")
-    assert first_session == second_session
-    assert json.loads(first_body)["extra_headers"]["x-opencode-session"] == first_session
-    assert json.loads(second_body)["extra_headers"]["x-opencode-session"] == second_session
-    assert not proxy.is_muse_compatible_model(union["model"])
-
 
 def test_set_opencode_session_replaces_embedded_epoch_without_touching_gpt() -> None:
     muse = {
-        "model": "opencode-go/muse-spark-1.3-contributor",
+        "model": "opencode-go/deepseek-flash",
         "extra_headers": {
             "X-OpenCode-Session": "old-session",
             "x-client-header": "keep",

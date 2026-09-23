@@ -15,21 +15,6 @@ from collections.abc import Iterable
 
 
 CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
-UNION_ALPHA_FREE_MODEL = "opencode-go/union-alpha-free"
-
-# Console Go exposes Anthropic's native ``thinking`` request field rather than
-# OpenAI's ``reasoning_effort`` field.  Keep this mapping local to the Union
-# bridge so the OpenAI-routed Omen model does not receive Anthropic fields.
-_UNION_REASONING_BUDGETS = {
-    "minimal": 1_024,
-    "low": 1_024,
-    "medium": 2_048,
-    "high": 4_096,
-    "xhigh": 8_192,
-    "max": 16_384,
-}
-
-
 def _json_text(value) -> str:
     if isinstance(value, str):
         return value
@@ -71,73 +56,14 @@ def _content_to_chat(content):
     return parts
 
 
-def _union_safe_tool_component(value: str) -> str:
-    """Normalize one Union tool-name component for Console Go."""
-    chars: list[str] = []
-    separator = False
-    for char in value:
-        if (
-            "a" <= char <= "z"
-            or "A" <= char <= "Z"
-            or "0" <= char <= "9"
-        ):
-            chars.append(char)
-            separator = False
-        elif not separator:
-            chars.append("_")
-            separator = True
-    normalized = "".join(chars).strip("_") or "tool"
-    if normalized == "exec":
-        return "run_code"
-    return normalized
-
-
-def _register_tool_alias(
-    alias: str,
-    namespace: str | None,
-    name: str,
-    tool_name_map: dict[str, tuple[str | None, str]],
-) -> str:
-    """Register a reversible provider alias, avoiding per-request collisions."""
-    original = (namespace, name)
-    existing = tool_name_map.get(alias)
-    if existing is None or existing == original:
-        tool_name_map[alias] = original
-        return alias
-
-    suffix = 2
-    while True:
-        candidate = f"{alias}_{suffix}"
-        existing = tool_name_map.get(candidate)
-        if existing is None or existing == original:
-            tool_name_map[candidate] = original
-            return candidate
-        suffix += 1
-
-
-def _union_safe_tool_name(
-    namespace: str | None,
-    name: str,
-    tool_name_map: dict[str, tuple[str | None, str]],
-) -> str:
-    """Create a provider-safe Union alias and retain its original identity."""
-    components = [_union_safe_tool_component(name)]
-    if namespace:
-        components.insert(0, _union_safe_tool_component(namespace))
-    return _register_tool_alias("_".join(components), namespace, name, tool_name_map)
-
-
 def _tool_name(
     item: dict,
     tool_name_map: dict[str, tuple[str | None, str]],
-    union_safe: bool = False,
 ) -> str:
     name = item.get("name")
     if not isinstance(name, str) or not name:
         name = "tool"
     namespace = item.get("namespace")
-    if union_safe:
-        return _union_safe_tool_name(namespace, name, tool_name_map)
     if isinstance(namespace, str) and namespace:
         flat = f"{namespace}__{name}"
         tool_name_map.setdefault(flat, (namespace, name))
@@ -148,7 +74,6 @@ def _tool_name(
 def _flatten_tools(
     tools: Iterable,
     tool_name_map: dict[str, tuple[str | None, str]],
-    union_safe: bool = False,
 ) -> list[dict]:
     flattened: list[dict] = []
 
@@ -169,11 +94,8 @@ def _flatten_tools(
         name = tool.get("name")
         if not isinstance(name, str) or not name:
             return
-        if union_safe:
-            flat_name = _union_safe_tool_name(namespace, name, tool_name_map)
-        else:
-            flat_name = name
-        if namespace and not union_safe:
+        flat_name = name
+        if namespace:
             flat_name = f"{namespace}__{name}"
             tool_name_map[flat_name] = (namespace, name)
 
@@ -198,9 +120,8 @@ def _append_function_call(
     messages: list[dict],
     item: dict,
     tool_name_map: dict[str, tuple[str | None, str]],
-    union_safe: bool = False,
 ) -> None:
-    name = _tool_name(item, tool_name_map, union_safe=union_safe)
+    name = _tool_name(item, tool_name_map)
     call_id = item.get("call_id") or item.get("id") or f"call_{len(messages)}"
     arguments = _json_text(item.get("arguments", item.get("input", "")))
     if (
@@ -243,22 +164,6 @@ def _append_message(messages: list[dict], item: dict) -> None:
     messages.append({"role": role, "content": _content_to_chat(item.get("content"))})
 
 
-def _union_thinking_from_responses(body: dict) -> dict | None:
-    """Translate Responses reasoning metadata to Anthropic's native thinking field."""
-    if body.get("model") != UNION_ALPHA_FREE_MODEL:
-        return None
-    reasoning = body.get("reasoning")
-    if not isinstance(reasoning, dict):
-        return None
-    effort = reasoning.get("effort")
-    if not isinstance(effort, str) or effort == "none":
-        return None
-    budget_tokens = _UNION_REASONING_BUDGETS.get(effort)
-    if budget_tokens is None:
-        return None
-    return {"type": "enabled", "budget_tokens": budget_tokens}
-
-
 def responses_to_chat_request(
     body: dict,
 ) -> tuple[dict, dict[str, tuple[str | None, str]]]:
@@ -270,7 +175,6 @@ def responses_to_chat_request(
     chat: dict = {"model": body.get("model")}
     messages: list[dict] = []
     tool_name_map: dict[str, tuple[str | None, str]] = {}
-    union_safe = body.get("model") == UNION_ALPHA_FREE_MODEL
 
     instructions = body.get("instructions")
     if isinstance(instructions, str) and instructions:
@@ -289,12 +193,7 @@ def responses_to_chat_request(
             ):
                 _append_message(messages, item)
             elif item_type in {"function_call", "custom_tool_call", "local_shell_call"}:
-                _append_function_call(
-                    messages,
-                    item,
-                    tool_name_map,
-                    union_safe=union_safe,
-                )
+                _append_function_call(messages, item, tool_name_map)
             elif item_type in {
                 "function_call_output",
                 "custom_tool_call_output",
@@ -306,17 +205,9 @@ def responses_to_chat_request(
         messages.append({"role": "user", "content": ""})
     chat["messages"] = messages
 
-    thinking = _union_thinking_from_responses(body)
-    if thinking is not None:
-        chat["thinking"] = thinking
-
     tools = body.get("tools")
     if isinstance(tools, list):
-        flattened_tools = _flatten_tools(
-            tools,
-            tool_name_map,
-            union_safe=union_safe,
-        )
+        flattened_tools = _flatten_tools(tools, tool_name_map)
         if flattened_tools:
             chat["tools"] = flattened_tools
             # Console Go currently accepts only the generic choice.

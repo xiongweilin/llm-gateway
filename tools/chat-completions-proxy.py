@@ -6,22 +6,15 @@ remains available as a direct Chat entry point.  The unified listener on
 This process forwards requests to 127.0.0.1:4101 without changing the Chat
 protocol or buffering streaming responses.
 
-The upstream OpenCode Go service requires an opaque session header for the
-chat-only deployment.  When that header is absent, this proxy adds it through
-LiteLLM's ``extra_headers`` request field and the outgoing HTTP header.  Other
-models pass through unchanged.
-
 No request or response body is logged, and the listener binds to loopback only.
 """
 
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import sys
-import uuid
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -36,123 +29,14 @@ except ModuleNotFoundError:  # pragma: no cover - direct file loading in tests
 
 
 DEFAULT_BACKEND = "http://127.0.0.1:4101"
-SESSION_HEADER = "x-opencode-session"
 CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
 RESPONSES_PATH = "/v1/responses"
 MODELS_PATH = "/v1/models"
 HEALTH_PATH = "/health/liveliness"
 CONTROL_PLANE_PATH_PREFIX = "/v1/alpha"
-_PROCESS_SESSION = f"chat-{uuid.uuid4().hex}"
 
 
 log = logging.getLogger("chat-completions-proxy")
-
-
-def _header_value(headers: Mapping[str, str], name: str) -> str | None:
-    expected = name.lower()
-    for key, value in headers.items():
-        if key.lower() == expected and isinstance(value, str) and value.strip():
-            return value.strip()
-    return None
-
-
-def _find_stable_session_value(value) -> str | None:
-    stable_keys = {
-        "threadid",
-        "thread_id",
-        "conversationid",
-        "conversation_id",
-        "sessionid",
-        "session_id",
-    }
-    if isinstance(value, dict):
-        for key, child in value.items():
-            if str(key).lower() in stable_keys and isinstance(child, str) and child.strip():
-                return child.strip()
-        for child in value.values():
-            found = _find_stable_session_value(child)
-            if found:
-                return found
-    elif isinstance(value, list):
-        for child in value:
-            found = _find_stable_session_value(child)
-            if found:
-                return found
-    return None
-
-
-def _opaque_session(source: str) -> str:
-    digest = hashlib.sha256(f"chat-session:{source}".encode()).hexdigest()
-    return f"chat-{digest[:32]}"
-
-
-def _model_requires_session(model: object) -> bool:
-    """Return whether the configured chat deployment needs a session header."""
-    # 2026-09-23：opencode-go/omen-alpha 与 opencode-go/union-alpha-free 已从
-    # 模型列表停用；恢复这两个模型时必须同时恢复下面的名单。
-    return model in {
-        # "opencode-go/omen-alpha",
-        # "opencode-go/union-alpha-free",
-    }
-
-
-def resolve_session(body: bytes, headers: Mapping[str, str]) -> str | None:
-    """Resolve the upstream session without exposing its value in logs."""
-    try:
-        obj = json.loads(body)
-    except Exception:
-        return None
-    if not isinstance(obj, dict) or not _model_requires_session(obj.get("model")):
-        return None
-
-    extra_headers = obj.get("extra_headers")
-    if isinstance(extra_headers, dict):
-        explicit = _header_value(extra_headers, SESSION_HEADER)
-        if explicit:
-            return explicit
-
-    explicit = _header_value(headers, SESSION_HEADER)
-    if explicit:
-        return explicit
-
-    for key in (
-        "thread_id",
-        "threadId",
-        "conversation_id",
-        "conversationId",
-        "session_id",
-        "sessionId",
-    ):
-        value = obj.get(key)
-        if isinstance(value, str) and value.strip():
-            return _opaque_session(value.strip())
-
-    native_id = _find_stable_session_value(obj.get("metadata"))
-    if native_id:
-        return _opaque_session(native_id)
-
-    return _PROCESS_SESSION
-
-
-def ensure_session(
-    body: bytes,
-    headers: Mapping[str, str],
-) -> tuple[bytes, str | None]:
-    """Add the provider session field only for the affected chat deployment."""
-    session = resolve_session(body, headers)
-    if session is None:
-        return body, None
-
-    try:
-        obj = json.loads(body)
-    except Exception:
-        return body, None
-    extra_headers = obj.get("extra_headers")
-    if not isinstance(extra_headers, dict):
-        extra_headers = {}
-    extra_headers[SESSION_HEADER] = session
-    obj["extra_headers"] = extra_headers
-    return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode(), session
 
 
 def build_upstream_url(backend: str, path: str, query_string: str = "") -> str:
@@ -227,7 +111,6 @@ async def handle(
             status=404,
         )
     body = await request.read()
-    provider_session: str | None = None
     model: object = None
     if request.method == "POST" and request.path == CHAT_COMPLETIONS_PATH:
         try:
@@ -245,12 +128,8 @@ async def handle(
                 },
                 status=404,
             )
-        body, provider_session = ensure_session(body, request.headers)
 
     headers = _forward_headers(request.headers, len(body))
-    if provider_session:
-        headers[SESSION_HEADER] = provider_session
-
     url = build_upstream_url(backend, request.path, request.query_string)
 
     try:

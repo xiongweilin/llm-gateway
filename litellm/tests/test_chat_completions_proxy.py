@@ -10,45 +10,12 @@ proxy = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(proxy)
 
 
-def test_chat_proxy_does_not_inject_sessions_for_disabled_chat_deployments() -> None:
-    for model in (
-        "opencode-go/omen-alpha",
-        "opencode-go/union-alpha-free",
-        "gpt-6-luna",
-    ):
-        request = {"model": model, "messages": [{"role": "user", "content": "hi"}]}
-        raw = json.dumps(request).encode()
-
-        normalized, session = proxy.ensure_session(raw, {})
-
-        assert normalized == raw
-        assert session is None
-
-
-def test_chat_proxy_preserves_explicit_session_header_without_body_injection() -> None:
-    request = {"model": "opencode-go/omen-alpha", "messages": []}
-    raw = json.dumps(request).encode()
+def test_chat_proxy_preserves_explicit_headers_without_body_rewrite() -> None:
     headers = {"X-OpEnCoDe-SeSsIoN": "explicit-session"}
+    forwarded = proxy._forward_headers(headers, 12)
 
-    normalized, session = proxy.ensure_session(raw, headers)
-    forwarded = proxy._forward_headers(headers, len(normalized))
-
-    assert normalized == raw
-    assert session is None
     assert forwarded["X-OpEnCoDe-SeSsIoN"] == "explicit-session"
-
-
-def test_chat_proxy_does_not_treat_responses_model_as_chat() -> None:
-    request = {
-        "model": "opencode-go/muse-spark-1.3-contributor",
-        "input": "hello",
-    }
-    raw = json.dumps(request).encode()
-
-    normalized, session = proxy.ensure_session(raw, {})
-
-    assert normalized == raw
-    assert session is None
+    assert forwarded["Content-Length"] == "12"
 
 
 def test_chat_proxy_enforces_protocol_boundary_and_filters_models() -> None:
@@ -69,12 +36,6 @@ def test_chat_proxy_enforces_protocol_boundary_and_filters_models() -> None:
     ).encode()
     filtered = json.loads(proxy.filter_models_response(upstream, {"chat-model-a"}))
     assert [item["id"] for item in filtered["data"]] == ["chat-model-a"]
-
-
-def test_chat_proxy_has_no_session_required_models_while_chat_deployments_are_disabled() -> None:
-    assert not proxy._model_requires_session("opencode-go/omen-alpha")
-    assert not proxy._model_requires_session("opencode-go/union-alpha-free")
-    assert not proxy._model_requires_session("omen-alpha")
 
 
 def test_chat_proxy_preserves_query_string() -> None:
