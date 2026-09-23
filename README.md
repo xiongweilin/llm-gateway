@@ -80,9 +80,9 @@ the opaque checkpoint handle back into a normal historical message before
 forwarding the request, so OpenCode Go receives only input item types it supports. This path runs only for an explicit Codex compaction request.
 
 The compaction target budget is `900000` estimated tokens and can be tuned with
-`MUSE_COMPACTION_TOKEN_BUDGET`. GPT routes, Omen, and the 4102 Chat Completions
+`MUSE_COMPACTION_TOKEN_BUDGET`. GPT routes and the 4102 Chat Completions
 path do not use this Responses compaction checkpoint path. The Codex model
-catalog marks Muse and DeepSeek Flash with `use_responses_lite=false` and an
+catalog marks DeepSeek Flash with `use_responses_lite=false` and an
 `auto_compact_token_limit` of `900000`.
 
 ## Local development
