@@ -275,8 +275,6 @@ def resolve_opencode_session(body: bytes, headers: Mapping[str, str]) -> str | N
 
     # A stable process fallback still satisfies the provider contract when an
     # older Codex build exposes no native conversation identifier at all.
-    if is_union_alpha_free_model(obj.get("model")):
-        return _UNION_PROCESS_SESSION
     return _OPENCODE_PROCESS_SESSION
 
 
