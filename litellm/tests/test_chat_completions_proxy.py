@@ -10,42 +10,32 @@ proxy = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(proxy)
 
 
-def test_chat_proxy_adds_session_only_for_chat_deployment() -> None:
-    omen = {"model": "opencode-go/omen-alpha", "messages": [{"role": "user", "content": "hi"}]}
-    raw_omen = json.dumps(omen).encode()
+def test_chat_proxy_does_not_inject_sessions_for_disabled_chat_deployments() -> None:
+    for model in (
+        "opencode-go/omen-alpha",
+        "opencode-go/union-alpha-free",
+        "gpt-6-luna",
+    ):
+        request = {"model": model, "messages": [{"role": "user", "content": "hi"}]}
+        raw = json.dumps(request).encode()
 
-    normalized, session = proxy.ensure_session(raw_omen, {})
+        normalized, session = proxy.ensure_session(raw, {})
 
-    assert session
-    assert json.loads(normalized)["extra_headers"]["x-opencode-session"] == session
-
-    union = {"model": "opencode-go/union-alpha-free", "messages": [{"role": "user", "content": "hi"}]}
-    raw_union = json.dumps(union).encode()
-
-    normalized_union, union_session = proxy.ensure_session(raw_union, {})
-
-    assert union_session
-    assert json.loads(normalized_union)["extra_headers"]["x-opencode-session"] == union_session
-
-    gpt = {"model": "gpt-5.6-luna", "messages": [{"role": "user", "content": "hi"}]}
-    raw_gpt = json.dumps(gpt).encode()
-    unchanged, no_session = proxy.ensure_session(raw_gpt, {})
-
-    assert unchanged == raw_gpt
-    assert no_session is None
+        assert normalized == raw
+        assert session is None
 
 
-def test_chat_proxy_preserves_explicit_session_header() -> None:
+def test_chat_proxy_preserves_explicit_session_header_without_body_injection() -> None:
     request = {"model": "opencode-go/omen-alpha", "messages": []}
     raw = json.dumps(request).encode()
+    headers = {"X-OpEnCoDe-SeSsIoN": "explicit-session"}
 
-    normalized, session = proxy.ensure_session(
-        raw,
-        {"X-OpEnCoDe-SeSsIoN": "explicit-session"},
-    )
+    normalized, session = proxy.ensure_session(raw, headers)
+    forwarded = proxy._forward_headers(headers, len(normalized))
 
-    assert session == "explicit-session"
-    assert json.loads(normalized)["extra_headers"]["x-opencode-session"] == "explicit-session"
+    assert normalized == raw
+    assert session is None
+    assert forwarded["X-OpEnCoDe-SeSsIoN"] == "explicit-session"
 
 
 def test_chat_proxy_does_not_treat_responses_model_as_chat() -> None:
@@ -81,9 +71,9 @@ def test_chat_proxy_enforces_protocol_boundary_and_filters_models() -> None:
     assert [item["id"] for item in filtered["data"]] == ["chat-model-a"]
 
 
-def test_chat_proxy_session_requires_formal_model_id() -> None:
-    assert proxy._model_requires_session("opencode-go/omen-alpha")
-    assert proxy._model_requires_session("opencode-go/union-alpha-free")
+def test_chat_proxy_has_no_session_required_models_while_chat_deployments_are_disabled() -> None:
+    assert not proxy._model_requires_session("opencode-go/omen-alpha")
+    assert not proxy._model_requires_session("opencode-go/union-alpha-free")
     assert not proxy._model_requires_session("omen-alpha")
 
 
