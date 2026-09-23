@@ -1,9 +1,7 @@
-# Start the unified public protocol ingress, the internal Chat ingress, and the
-# LiteLLM routing core.
+# Start the unified public protocol ingress and the LiteLLM routing core.
 #
 #   Unified Responses/Chat ingress -> 127.0.0.1:4100
 #   LiteLLM routing core            -> 127.0.0.1:4101
-#   Chat Completions hop            -> 127.0.0.1:4102
 #
 # The filename is retained for existing scheduled-task and operator references.
 # Its public behavior and output are protocol-neutral.
@@ -24,20 +22,15 @@ $GenerateRuntimeConfig = Join-Path $Root 'scripts\generate-runtime-config.ps1'
 $Python = Join-Path $Root 'litellm\.venv\Scripts\python.exe'
 $ServerEntry = Join-Path $Root 'litellm\run_server.py'
 $ResponsesIngress = Join-Path $Root 'tools\responses-proxy.py'
-$UnionAnthropicBridge = Join-Path $Root 'tools\union_anthropic_bridge.py'
-$ChatIngress = Join-Path $Root 'tools\chat-completions-proxy.py'
-$ChatBackend = 'http://127.0.0.1:4102'
+$ChatBackend = 'http://127.0.0.1:4101'
 
 $CoreOut = Join-Path $Root 'litellm\.litellm-core.out.log'
 $CoreErr = Join-Path $Root 'litellm\.litellm-core.err.log'
 $ResponsesOut = Join-Path $Root 'litellm\.responses-ingress.out.log'
 $ResponsesErr = Join-Path $Root 'litellm\.responses-ingress.err.log'
-$ChatOut = Join-Path $Root 'litellm\.chat-completions-ingress.out.log'
-$ChatErr = Join-Path $Root 'litellm\.chat-completions-ingress.err.log'
 
 $CorePidFile = Join-Path $Root 'litellm\.litellm-core.pid'
 $ResponsesPidFile = Join-Path $Root 'litellm\.responses-ingress.pid'
-$ChatPidFile = Join-Path $Root 'litellm\.chat-completions-ingress.pid'
 
 $ControlPlaneBackend = if ([string]::IsNullOrWhiteSpace($env:CHATGPT_API_BASE)) {
     'https://chatgpt.com/backend-api/codex'
@@ -132,14 +125,14 @@ function Remove-RuntimeArtifacts {
     foreach ($path in @(
         $CorePidFile,
         $ResponsesPidFile,
-        $ChatPidFile,
         $CoreOut,
         $CoreErr,
         $ResponsesOut,
         $ResponsesErr,
-        $ChatOut,
-        $ChatErr,
         # legacy cleanup: artifacts written by older revisions
+        (Join-Path $Root 'litellm\.chat-completions-ingress.pid'),
+        (Join-Path $Root 'litellm\.chat-completions-ingress.out.log'),
+        (Join-Path $Root 'litellm\.chat-completions-ingress.err.log'),
         (Join-Path $Root 'litellm\.agent-gateway.pid'),
         (Join-Path $Root 'litellm\.agent-proxy.pid'),
         (Join-Path $Root 'litellm\.responses-proxy.pid'),
@@ -225,8 +218,6 @@ foreach ($requiredPath in @(
     $Python,
     $ServerEntry,
     $ResponsesIngress,
-    $UnionAnthropicBridge,
-    $ChatIngress,
     $ModelSource,
     $RuntimeTemplate,
     $GenerateRuntimeConfig
@@ -259,14 +250,13 @@ $ExpectedUnified = @(
         Sort-Object -Unique
 )
 
-Stop-OwnedPort -Port 4102 -Label 'Chat Completions ingress'
+Stop-OwnedPort -Port 4102 -Label 'legacy Chat Completions ingress'
 Stop-OwnedPort -Port 4100 -Label 'Unified protocol ingress'
 Stop-OwnedPort -Port 4101 -Label 'LiteLLM core'
 Remove-RuntimeArtifacts
 
 $core = $null
 $responses = $null
-$chat = $null
 try {
     $core = Start-Process `
         -FilePath $Python `
@@ -302,40 +292,15 @@ try {
     ([int]$responsesOwner.OwningProcess) | Set-Content -LiteralPath $ResponsesPidFile
     Write-Host 'Unified protocol ingress ready (127.0.0.1:4100)'
 
-    $chat = Start-Process `
-        -FilePath $Python `
-        -WorkingDirectory $Root `
-        -ArgumentList @($ChatIngress, '4102', 'http://127.0.0.1:4101', $RuntimeConfig) `
-        -RedirectStandardOutput $ChatOut `
-        -RedirectStandardError $ChatErr `
-        -WindowStyle Hidden `
-        -PassThru
-    $chat.Id | Set-Content -LiteralPath $ChatPidFile
-    Wait-HttpReady -Uri 'http://127.0.0.1:4102/health/liveliness' -Label 'Chat Completions ingress' -Attempts 40
-    $chatOwner = Get-PortOwner -Port 4102
-    if ($null -eq $chatOwner) {
-        throw 'Chat Completions ingress health check passed without a listening process'
-    }
-    ([int]$chatOwner.OwningProcess) | Set-Content -LiteralPath $ChatPidFile
-    Write-Host 'Chat Completions ingress ready (127.0.0.1:4102)'
-
     if (-not $NoVerify) {
         $responseCatalog = Invoke-RestMethod -Uri 'http://127.0.0.1:4100/v1/models' -TimeoutSec 30
-        $chatCatalog = Invoke-RestMethod -Uri 'http://127.0.0.1:4102/v1/models' -TimeoutSec 30
         Assert-CatalogMatches -Label 'Unified protocol ingress' -Actual (Get-CatalogIds $responseCatalog) -Expected $ExpectedUnified
-        Assert-CatalogMatches -Label 'Chat Completions ingress' -Actual (Get-CatalogIds $chatCatalog) -Expected $ExpectedChat
-
-        $wrongChat = Invoke-WebRequest -Uri 'http://127.0.0.1:4102/v1/responses' -Method Get -TimeoutSec 10 -UseBasicParsing -SkipHttpErrorCheck
-        if ($wrongChat.StatusCode -ne 404) {
-            throw 'Chat Completions hop protocol boundary verification failed'
-        }
     }
 } catch {
     Show-LogTail -Label 'LiteLLM core stderr' -Path $CoreErr
     Show-LogTail -Label 'Unified protocol ingress stderr' -Path $ResponsesErr
-    Show-LogTail -Label 'Chat Completions ingress stderr' -Path $ChatErr
     foreach ($cleanup in @(
-        @{ Port = 4102; Label = 'Chat Completions ingress' },
+        @{ Port = 4102; Label = 'legacy Chat Completions ingress' },
         @{ Port = 4100; Label = 'Unified protocol ingress' },
         @{ Port = 4101; Label = 'LiteLLM core' }
     )) {
