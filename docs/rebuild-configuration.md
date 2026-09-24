@@ -6,19 +6,19 @@ including secret values or a model inventory.
 ## Repository location
 
 ```text
-D:\agent\litellm-gateway
+D:\agent\llm-gateway
 ```
 
 The LiteLLM Python environment is under:
 
 ```text
-D:\agent\litellm-gateway\litellm\.venv
+D:\agent\llm-gateway\litellm\.venv
 ```
 
 Install or refresh the locked environment with:
 
 ```powershell
-Set-Location D:\agent\litellm-gateway\litellm
+Set-Location D:\agent\llm-gateway\litellm
 uv sync --locked
 ```
 
@@ -41,7 +41,7 @@ header when applicable and otherwise uses its own bounded backoff.
 Generate and validate the runtime file:
 
 ```powershell
-Set-Location D:\agent\litellm-gateway
+Set-Location D:\agent\llm-gateway
 pwsh -NoProfile -File .\scripts\generate-runtime-config.ps1
 ```
 
@@ -71,7 +71,7 @@ The existing script filenames are retained because a scheduled task and local
 operator tooling reference them. Their implementation is protocol-neutral.
 
 ```powershell
-Set-Location D:\agent\litellm-gateway
+Set-Location D:\agent\llm-gateway
 pwsh -NoProfile -File .\scripts\start-agent-gateway.ps1
 pwsh -NoProfile -File .\scripts\stop-agent-gateway.ps1
 ```
@@ -103,7 +103,7 @@ configuration.
 ## Verification
 
 ```powershell
-Set-Location D:\agent\litellm-gateway\litellm
+Set-Location D:\agent\llm-gateway\litellm
 uv run pytest -q
 ```
 
