@@ -1,6 +1,6 @@
-# LiteLLM Gateway
+# LLM Gateway
 
-[![CI](https://github.com/xiongweilin/litellm-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/xiongweilin/litellm-gateway/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![CI](https://github.com/xiongweilin/llm-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/xiongweilin/llm-gateway/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 LiteLLM Gateway provides protocol-specific OpenAI-compatible ingress and
 centralized model routing for local runtimes.
@@ -88,9 +88,9 @@ catalog marks DeepSeek Flash with `use_responses_lite=false` and an
 ## Local development
 
 ```powershell
-Set-Location D:\agent\litellm-gateway\litellm
+Set-Location D:\agent\llm-gateway\litellm
 uv sync --locked
-Set-Location D:\agent\litellm-gateway
+Set-Location D:\agent\llm-gateway
 pwsh -NoProfile -File .\scripts\generate-runtime-config.ps1
 pwsh -NoProfile -File .\scripts\start-agent-gateway.ps1
 ```
