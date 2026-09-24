@@ -5,7 +5,7 @@
 
 ## 1. 组件声明
 
-本组件是个人 Agent 项目（`D:\agent\litellm-gateway`）内的独立网关组件。
+本组件是个人 Agent 项目（`D:\agent\llm-gateway`）内的独立网关组件。
 
 - LiteLLM 使用**项目内独立 uv 环境**（`gateway/litellm/.venv` 与 `uv.lock`），不写入系统级 Python。
 - 网关**无数据库运行**：不设置 `database_url`、`store_model_in_db: false`，配置只来自 `config.yaml`。
@@ -115,7 +115,7 @@ chat completions 响应 usage 实际映射：`usage.prompt_tokens_details.cached
 ## 6. 复现步骤
 
 ```powershell
-cd D:\agent\litellm-gateway\gateway\litellm
+cd D:\agent\llm-gateway\gateway\litellm
 uv sync --locked
 # 测试会自动：启动 fake provider → 以临时端口启动 litellm 代理子进程（注入
 # LITELLM_MASTER_KEY / FAKE_PROVIDER_API_KEY / FAKE_PROVIDER_API_BASE）→ 运行断言 → 清理子进程
