@@ -118,7 +118,7 @@ from the process environment. No credential value belongs in this repository.
 Install the locked environment:
 
 ```powershell
-Set-Location D:\agent\litellm-gateway\litellm
+Set-Location D:\agent\llm-gateway\litellm
 uv sync --locked
 ```
 
@@ -126,7 +126,7 @@ The existing lifecycle script paths are retained for scheduled-task
 compatibility:
 
 ```powershell
-Set-Location D:\agent\litellm-gateway
+Set-Location D:\agent\llm-gateway
 pwsh -NoProfile -File .\scripts\start-agent-gateway.ps1
 pwsh -NoProfile -File .\scripts\stop-agent-gateway.ps1
 ```
@@ -148,7 +148,7 @@ http://127.0.0.1:4102/health/liveliness
 Run the focused unit and conformance tests from `litellm`:
 
 ```powershell
-Set-Location D:\agent\litellm-gateway\litellm
+Set-Location D:\agent\llm-gateway\litellm
 uv run pytest -q
 ```
 
