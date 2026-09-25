@@ -7,7 +7,11 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from llm_gateway.chatgpt_auth import ChatGPTCredentials
 from llm_gateway.config import ModelRoute, load_model_routes, protocol_models
-from llm_gateway.core_server import build_upstream_headers, create_app
+from llm_gateway.core_server import (
+    build_upstream_headers,
+    create_app,
+    normalize_chatgpt_responses_payload,
+)
 from fake_provider import FakeProviderServer
 
 
@@ -103,6 +107,69 @@ def test_codex_route_replaces_client_auth_with_litellm_compatible_chatgpt_auth()
         "session_id": "synthetic-session-id",
         "ChatGPT-Account-Id": "subscription-account-id",
         "Accept-Encoding": "identity",
+    }
+
+
+def test_chatgpt_route_supplies_legacy_provider_headers_when_client_omits_them() -> None:
+    route = ModelRoute(
+        id="codex-model",
+        mode="responses",
+        upstream_model="provider-model",
+        api_base="https://chatgpt.com/backend-api/codex",
+        authorization="chatgpt",
+    )
+
+    actual = build_upstream_headers(
+        {},
+        route,
+        environ={},
+        chatgpt_credentials=ChatGPTCredentials(
+            access_token="subscription-oauth-token",
+            account_id="subscription-account-id",
+        ),
+    )
+
+    assert actual["Authorization"] == "Bearer subscription-oauth-token"
+    assert actual["ChatGPT-Account-Id"] == "subscription-account-id"
+    assert actual["Content-Type"] == "application/json"
+    assert actual["Accept"] == "text/event-stream"
+    assert actual["Originator"] == "codex_cli_rs"
+    assert actual["User-Agent"].startswith("codex_cli_rs/")
+    assert actual["session_id"]
+    assert actual["Accept-Encoding"] == "identity"
+
+
+def test_chatgpt_responses_payload_matches_legacy_provider_contract() -> None:
+    payload = {
+        "model": "provider-model",
+        "input": [{"role": "user", "content": "hello"}],
+        "instructions": "existing instructions",
+        "stream": False,
+        "store": True,
+        "include": ["some.other.field"],
+        "tools": [],
+        "tool_choice": "auto",
+        "reasoning": {"effort": "high"},
+        "previous_response_id": "response-id",
+        "truncation": "auto",
+        "metadata": {"must": "be dropped"},
+        "max_output_tokens": 123,
+    }
+
+    normalize_chatgpt_responses_payload(payload)
+
+    assert payload == {
+        "model": "provider-model",
+        "input": [{"role": "user", "content": "hello"}],
+        "instructions": "existing instructions",
+        "stream": True,
+        "store": False,
+        "include": ["some.other.field", "reasoning.encrypted_content"],
+        "tools": [],
+        "tool_choice": "auto",
+        "reasoning": {"effort": "high"},
+        "previous_response_id": "response-id",
+        "truncation": "auto",
     }
 
 
