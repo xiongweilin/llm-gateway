@@ -5,7 +5,7 @@ import base64
 import json
 import time
 
-from aiohttp import web
+from aiohttp import ClientSession, web
 from aiohttp.test_utils import TestClient, TestServer
 
 from llm_gateway.chatgpt_auth import get_chatgpt_credentials
@@ -45,7 +45,7 @@ def test_chatgpt_auth_reads_codex_subscription_login(tmp_path) -> None:
     )
 
     async def exercise() -> None:
-        async with web.ClientSession() as session:
+        async with ClientSession() as session:
             credentials = await get_chatgpt_credentials(
                 session,
                 auth_paths=[auth_file],
@@ -97,7 +97,7 @@ def test_chatgpt_auth_refreshes_expired_codex_login(tmp_path) -> None:
         app = web.Application()
         app.router.add_post("/oauth/token", token_handler)
         async with TestClient(TestServer(app)) as auth_server:
-            async with web.ClientSession() as session:
+            async with ClientSession() as session:
                 credentials = await get_chatgpt_credentials(
                     session,
                     auth_paths=[auth_file],
