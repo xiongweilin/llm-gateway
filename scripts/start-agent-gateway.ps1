@@ -16,9 +16,10 @@ $ListenHost = [string]$GatewayConfig.listen_host
 $CorePort = [int]$GatewayConfig.ports.core
 $AgentPort = [int]$GatewayConfig.ports.agent
 $ResponsesPort = [int]$GatewayConfig.ports.responses
-$Ports = @($CorePort, $AgentPort, $ResponsesPort)
-if ([string]::IsNullOrWhiteSpace($ListenHost) -or @($Ports | Sort-Object -Unique).Count -ne 3) {
-    throw 'gateway host and three distinct service ports must be configured'
+$ChatPort = [int]$GatewayConfig.ports.chat
+$Ports = @($CorePort, $AgentPort, $ResponsesPort, $ChatPort)
+if ([string]::IsNullOrWhiteSpace($ListenHost) -or @($Ports | Sort-Object -Unique).Count -ne 4) {
+    throw 'gateway host and four distinct service ports must be configured'
 }
 
 $CoreDir = Join-Path $Root 'core'
@@ -26,17 +27,19 @@ $Python = Join-Path $CoreDir '.venv\Scripts\python.exe'
 $ModelsPath = Join-Path $Root ([string]$GatewayConfig.models_file)
 $AgentEntry = Join-Path $Root 'tools\agent-gateway.py'
 $ResponsesEntry = Join-Path $Root 'tools\responses-proxy.py'
+$ChatEntry = Join-Path $Root 'tools\chat-completions-proxy.py'
 $RuntimeDir = Join-Path $CoreDir '.run'
 $CoreUrl = "http://${ListenHost}:$CorePort"
 $AgentUrl = "http://${ListenHost}:$AgentPort"
 $ResponsesUrl = "http://${ListenHost}:$ResponsesPort"
+$ChatUrl = "http://${ListenHost}:$ChatPort"
 $ControlPlaneBackend = if (-not [string]::IsNullOrWhiteSpace($env:CHATGPT_API_BASE)) {
     $env:CHATGPT_API_BASE.TrimEnd('/')
 } else {
     [string]$GatewayConfig.control_plane_backend
 }
 
-foreach ($requiredPath in @($ModelsPath, $AgentEntry, $ResponsesEntry)) {
+foreach ($requiredPath in @($ModelsPath, $AgentEntry, $ResponsesEntry, $ChatEntry)) {
     if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
         throw "required gateway file is missing: $requiredPath"
     }
@@ -147,10 +150,13 @@ $CoreOut = Join-Path $RuntimeDir 'core.out.log'
 $CoreErr = Join-Path $RuntimeDir 'core.err.log'
 $AgentOut = Join-Path $RuntimeDir 'agent.out.log'
 $AgentErr = Join-Path $RuntimeDir 'agent.err.log'
+$ChatOut = Join-Path $RuntimeDir 'chat.out.log'
+$ChatErr = Join-Path $RuntimeDir 'chat.err.log'
 $ResponsesOut = Join-Path $RuntimeDir 'responses.out.log'
 $ResponsesErr = Join-Path $RuntimeDir 'responses.err.log'
 $CorePid = Join-Path $RuntimeDir 'core.pid'
 $AgentPid = Join-Path $RuntimeDir 'agent.pid'
+$ChatPid = Join-Path $RuntimeDir 'chat.pid'
 $ResponsesPid = Join-Path $RuntimeDir 'responses.pid'
 
 $ModelSetsJson = & $Python (Join-Path $Root 'tools\protocol_models.py') $ModelsPath | Out-String
@@ -165,6 +171,7 @@ $ExpectedUnified = @(@($ExpectedResponses) + @($ExpectedChat) | Sort-Object -Uni
 # Only listeners owned by this checkout are replaced when the user runs this script.
 Stop-OwnedPort -Port $AgentPort -Label 'unified Agent entry'
 Stop-OwnedPort -Port $ResponsesPort -Label 'Responses protocol service'
+Stop-OwnedPort -Port $ChatPort -Label 'Chat Completions service'
 Stop-OwnedPort -Port $CorePort -Label 'model routing core'
 
 $Processes = @()
@@ -176,6 +183,13 @@ try {
     $Processes += $CoreProcess
     Wait-HttpReady -Uri "$CoreUrl/health/liveliness" -Label 'Core'
 
+    $ChatProcess = Start-Process -FilePath $Python -WorkingDirectory $Root `
+        -ArgumentList @($ChatEntry, '--host', $ListenHost, '--port', [string]$ChatPort, '--core-url', $CoreUrl, '--models-config', "`"$ModelsPath`"") `
+        -RedirectStandardOutput $ChatOut -RedirectStandardError $ChatErr -WindowStyle Hidden -PassThru
+    $ChatProcess.Id | Set-Content -LiteralPath $ChatPid
+    $Processes += $ChatProcess
+    Wait-HttpReady -Uri "$ChatUrl/health/liveliness" -Label 'Chat Completions service'
+
     $ResponsesProcess = Start-Process -FilePath $Python -WorkingDirectory $Root `
         -ArgumentList @($ResponsesEntry, '--host', $ListenHost, '--port', [string]$ResponsesPort, '--core-url', $CoreUrl, '--control-plane-backend', "`"$ControlPlaneBackend`"", '--models-config', "`"$ModelsPath`"") `
         -RedirectStandardOutput $ResponsesOut -RedirectStandardError $ResponsesErr -WindowStyle Hidden -PassThru
@@ -184,7 +198,7 @@ try {
     Wait-HttpReady -Uri "$ResponsesUrl/health/liveliness" -Label 'Responses service'
 
     $AgentProcess = Start-Process -FilePath $Python -WorkingDirectory $Root `
-        -ArgumentList @($AgentEntry, '--host', $ListenHost, '--port', [string]$AgentPort, '--core-url', $CoreUrl, '--responses-url', $ResponsesUrl, '--models-config', "`"$ModelsPath`"") `
+        -ArgumentList @($AgentEntry, '--host', $ListenHost, '--port', [string]$AgentPort, '--core-url', $CoreUrl, '--responses-url', $ResponsesUrl, '--chat-url', $ChatUrl, '--models-config', "`"$ModelsPath`"") `
         -RedirectStandardOutput $AgentOut -RedirectStandardError $AgentErr -WindowStyle Hidden -PassThru
     $AgentProcess.Id | Set-Content -LiteralPath $AgentPid
     $Processes += $AgentProcess
@@ -195,14 +209,18 @@ try {
         Assert-CatalogMatches -Label 'Agent entry' -Actual (Get-CatalogIds $AgentCatalog) -Expected $ExpectedUnified
         $ResponsesCatalog = Invoke-RestMethod -Uri "$ResponsesUrl/v1/models" -TimeoutSec 20
         Assert-CatalogMatches -Label 'Responses service' -Actual (Get-CatalogIds $ResponsesCatalog) -Expected $ExpectedResponses
+        $ChatCatalog = Invoke-RestMethod -Uri "$ChatUrl/v1/models" -TimeoutSec 20
+        Assert-CatalogMatches -Label 'Chat service' -Actual (Get-CatalogIds $ChatCatalog) -Expected $ExpectedChat
     }
 } catch {
     Show-LogTail -Label 'Core stderr' -Path $CoreErr
+    Show-LogTail -Label 'Chat stderr' -Path $ChatErr
     Show-LogTail -Label 'Responses service stderr' -Path $ResponsesErr
     Show-LogTail -Label 'Agent entry stderr' -Path $AgentErr
     foreach ($Item in @(
         @{ Port = $AgentPort; Label = 'unified Agent entry' },
         @{ Port = $ResponsesPort; Label = 'Responses protocol service' },
+        @{ Port = $ChatPort; Label = 'Chat Completions service' },
         @{ Port = $CorePort; Label = 'model routing core' }
     )) {
         try { Stop-OwnedPort -Port $Item.Port -Label $Item.Label } catch { Write-Warning "cleanup failed for $($Item.Label)" }
@@ -210,4 +228,4 @@ try {
     throw
 }
 
-Write-Host "Gateway ready: Core=$CoreUrl Agent=$AgentUrl Responses=$ResponsesUrl"
+Write-Host "Gateway ready: Core=$CoreUrl Agent=$AgentUrl Responses=$ResponsesUrl Chat=$ChatUrl"

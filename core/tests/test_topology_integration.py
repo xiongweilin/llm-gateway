@@ -33,9 +33,10 @@ def _load_script_module(name: str, filename: str):
 
 agent_gateway = _load_script_module("topology_agent_gateway", "agent-gateway.py")
 responses_service = _load_script_module("topology_responses_service", "responses-proxy.py")
+chat_service = _load_script_module("topology_chat_service", "chat-completions-proxy.py")
 
 
-def test_agent_responses_and_chat_requests_follow_the_configured_three_service_topology(
+def test_agent_routes_responses_and_chat_through_their_protocol_services(
     monkeypatch,
 ) -> None:
     provider = FakeProviderServer().start()
@@ -62,7 +63,9 @@ def test_agent_responses_and_chat_requests_follow_the_configured_three_service_t
         async with TestClient(TestServer(create_core_app(routes))) as core_client:
             core_url = str(core_client.make_url("/")).rstrip("/")
             response_session = ClientSession(trust_env=False)
+            chat_session = ClientSession(trust_env=False)
             response_app = web.Application(client_max_size=128 * 1024 * 1024)
+            chat_app = web.Application(client_max_size=128 * 1024 * 1024)
 
             async def response_handler(request: web.Request):
                 return await responses_service.handle(
@@ -71,91 +74,98 @@ def test_agent_responses_and_chat_requests_follow_the_configured_three_service_t
                     response_session,
                     None,
                     {"responses-model"},
-                    {"chat-model"},
+                )
+
+            async def chat_handler(request: web.Request):
+                return await chat_service.handle(
+                    request,
                     core_url,
+                    chat_session,
+                    {"chat-model"},
                 )
 
             response_app.router.add_route("*", "/{tail:.*}", response_handler)
+            chat_app.router.add_route("*", "/{tail:.*}", chat_handler)
             try:
                 async with TestClient(TestServer(response_app)) as response_client:
                     responses_url = str(response_client.make_url("/")).rstrip("/")
-                    agent_app = agent_gateway.create_app(
-                        core_url,
-                        responses_url,
-                        {"chat-model"},
-                    )
-                    async with TestClient(TestServer(agent_app)) as agent_client:
-                        native = await agent_client.post(
-                            "/v1/responses",
-                            json={
-                                "model": "responses-model",
-                                "input": [{"role": "user", "content": "native"}],
-                            },
+                    async with TestClient(TestServer(chat_app)) as chat_client:
+                        chat_url = str(chat_client.make_url("/")).rstrip("/")
+                        agent_app = agent_gateway.create_app(
+                            core_url,
+                            responses_url,
+                            chat_url,
+                            {"chat-model"},
                         )
-                        assert native.status == 200
-                        assert (await native.json())["model"] == "upstream-responses-model"
-
-                        compressed_request = zstandard.ZstdCompressor().compress(
-                            json.dumps(
-                                {
+                        async with TestClient(TestServer(agent_app)) as agent_client:
+                            native = await agent_client.post(
+                                "/v1/responses",
+                                json={
                                     "model": "responses-model",
-                                    "input": [{"role": "user", "content": "compressed"}],
-                                }
-                            ).encode("utf-8")
-                        )
-                        compressed = await agent_client.post(
-                            "/v1/responses",
-                            data=compressed_request,
-                            headers={
-                                "Content-Type": "application/json",
-                                "Content-Encoding": "zstd",
-                            },
-                        )
-                        assert compressed.status == 200
-                        assert (await compressed.json())["model"] == "upstream-responses-model"
+                                    "input": [{"role": "user", "content": "native"}],
+                                },
+                            )
+                            assert native.status == 200
+                            assert (await native.json())["model"] == "upstream-responses-model"
 
-                        bridged = await agent_client.post(
-                            "/v1/responses",
-                            json={
-                                "model": "chat-model",
-                                "input": [{"role": "user", "content": "bridged"}],
-                            },
-                        )
-                        assert bridged.status == 200
-                        bridged_body = await bridged.json()
-                        assert bridged_body["output"][0]["content"][0]["text"] == "echo: bridged"
+                            compressed_request = zstandard.ZstdCompressor().compress(
+                                json.dumps(
+                                    {
+                                        "model": "responses-model",
+                                        "input": [{"role": "user", "content": "compressed"}],
+                                    }
+                                ).encode("utf-8")
+                            )
+                            compressed = await agent_client.post(
+                                "/v1/responses",
+                                data=compressed_request,
+                                headers={
+                                    "Content-Type": "application/json",
+                                    "Content-Encoding": "zstd",
+                                },
+                            )
+                            assert compressed.status == 200
+                            assert (await compressed.json())["model"] == "upstream-responses-model"
 
-                        direct_chat = await agent_client.post(
-                            "/v1/chat/completions",
-                            json={
-                                "model": "chat-model",
-                                "messages": [{"role": "user", "content": "chat"}],
-                            },
-                        )
-                        assert direct_chat.status == 200
-                        chat_body = await direct_chat.json()
-                        assert chat_body["choices"][0]["message"]["content"] == "echo: chat"
+                            response_chat = await agent_client.post(
+                                "/v1/responses",
+                                json={
+                                    "model": "chat-model",
+                                    "input": [{"role": "user", "content": "not bridged"}],
+                                },
+                            )
+                            assert response_chat.status == 404
 
-                        agent_models = await agent_client.get("/v1/models")
-                        assert {item["id"] for item in (await agent_models.json())["data"]} == {
+                            direct_chat = await agent_client.post(
+                                "/v1/chat/completions",
+                                json={
+                                    "model": "chat-model",
+                                    "messages": [{"role": "user", "content": "chat"}],
+                                },
+                            )
+                            assert direct_chat.status == 200
+                            chat_body = await direct_chat.json()
+                            assert chat_body["choices"][0]["message"]["content"] == "echo: chat"
+
+                            agent_models = await agent_client.get("/v1/models")
+                            assert {item["id"] for item in (await agent_models.json())["data"]} == {
+                                "responses-model",
+                                "chat-model",
+                            }
+
+                        response_models = await response_client.get("/v1/models")
+                        assert {item["id"] for item in (await response_models.json())["data"]} == {
                             "responses-model",
-                            "chat-model",
                         }
-
-                    response_models = await response_client.get("/v1/models")
-                    assert {item["id"] for item in (await response_models.json())["data"]} == {
-                        "responses-model",
-                        "chat-model",
-                    }
             finally:
                 await response_session.close()
+                await chat_session.close()
 
     try:
         asyncio.run(exercise())
         assert [record["path"] for record in provider.records()] == [
             "/v1/responses",
             "/v1/responses",
-            "/v1/chat/completions",
             "/v1/chat/completions",
         ]
     finally:

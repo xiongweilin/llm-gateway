@@ -57,7 +57,8 @@ $ListenHost = [string]$GatewayConfig.listen_host
 $CorePort = [int]$GatewayConfig.ports.core
 $AgentPort = [int]$GatewayConfig.ports.agent
 $ResponsesPort = [int]$GatewayConfig.ports.responses
-$GatewayPorts = @($CorePort, $AgentPort, $ResponsesPort)
+$ChatPort = [int]$GatewayConfig.ports.chat
+$GatewayPorts = @($CorePort, $AgentPort, $ResponsesPort, $ChatPort)
 $CoreServiceUrl = "http://${ListenHost}:$CorePort"
 $AgentServiceUrl = "http://${ListenHost}:$AgentPort"
 $ResponsesServiceUrl = "http://${ListenHost}:$ResponsesPort"
@@ -276,7 +277,8 @@ function GatewayHealthy {
     return (
         (Status "$CoreServiceUrl/health/liveliness") -eq 200 -and
         (Status "$AgentServiceUrl/health/liveliness") -eq 200 -and
-        (Status "$ResponsesServiceUrl/health/liveliness") -eq 200
+        (Status "$ResponsesServiceUrl/health/liveliness") -eq 200 -and
+        (Status "http://${ListenHost}:$ChatPort/health/liveliness") -eq 200
     )
 }
 function GatewayModelsMatch{

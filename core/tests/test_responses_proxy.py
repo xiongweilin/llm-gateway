@@ -12,7 +12,7 @@ SPEC.loader.exec_module(proxy)
 
 def test_collaboration_request_uses_plaintext_alias() -> None:
     request = {
-        "model": "gpt-5.6-luna",
+        "model": "gpt-6-luna",
         "input": [
             {
                 "type": "additional_tools",
@@ -123,7 +123,7 @@ def test_agent_message_conversion_is_scoped_to_opencode_plaintext() -> None:
     assert json.loads(proxy.normalize_agent_messages(json.dumps(encrypted).encode())) == encrypted
 
     chatgpt = json.loads(json.dumps(plain))
-    chatgpt["model"] = "gpt-5.6-luna"
+    chatgpt["model"] = "gpt-6-luna"
     assert json.loads(proxy.normalize_agent_messages(json.dumps(chatgpt).encode())) == chatgpt
 
 
@@ -430,7 +430,7 @@ def test_additional_tools_are_lifted_for_opencode() -> None:
 
 def test_additional_tools_are_unchanged_for_chatgpt() -> None:
     request = {
-        "model": "gpt-5.6-luna",
+        "model": "gpt-6-luna",
         "input": [{"type": "additional_tools", "tools": []}],
     }
     raw = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode()
@@ -492,7 +492,7 @@ def test_search_content_types_are_kept_only_for_preview_tools() -> None:
 
 def test_search_content_types_are_unchanged_for_chatgpt() -> None:
     request = {
-        "model": "gpt-5.6-luna",
+        "model": "gpt-6-luna",
         "tools": [
             {"type": "web_search", "search_content_types": ["text"]},
         ],
@@ -528,13 +528,13 @@ def test_opencode_tool_descriptions_are_nonempty_and_scoped() -> None:
     assert normalized["tools"][1]["description"] == "omitted tool"
     assert normalized["tools"][2]["description"] == "Keep this"
 
-    request["model"] = "gpt-5.6-luna"
+    request["model"] = "gpt-6-luna"
     raw = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode()
     assert proxy.normalize_opencode_tool_descriptions(raw) is raw
 
 
 def test_scalar_responses_input_is_normalized_for_chatgpt_backend() -> None:
-    request = {"model": "gpt-5.6-luna", "input": "diagnose this alert"}
+    request = {"model": "gpt-6-luna", "input": "diagnose this alert"}
 
     normalized = json.loads(proxy.normalize_scalar_responses_input(json.dumps(request).encode()))
 
@@ -803,7 +803,7 @@ def test_tool_schema_normalization_reaches_nested_namespaces() -> None:
 
 def test_tool_schema_normalization_keeps_valid_request_unchanged() -> None:
     request = {
-        "model": "gpt-5.6-luna",
+        "model": "gpt-6-luna",
         "input": [],
         "tools": [
             {
@@ -838,7 +838,7 @@ def test_tool_schema_required_normalization_is_scoped_to_opencode() -> None:
     normalized = json.loads(proxy.normalize_tool_schemas(json.dumps(request).encode()))
     assert normalized["tools"][0]["parameters"]["required"] == ["cmd", "limit"]
 
-    request["model"] = "gpt-5.6-luna"
+    request["model"] = "gpt-6-luna"
     raw = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode()
     assert proxy.normalize_tool_schemas(raw) is raw
 
@@ -873,7 +873,7 @@ def test_custom_tool_declarations_are_bridged_for_opencode() -> None:
     }
     assert normalized["input"][1]["type"] == "function_call_output"
 
-    request["model"] = "gpt-5.6-luna"
+    request["model"] = "gpt-6-luna"
     raw = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode()
     assert proxy.normalize_opencode_custom_tools(raw) is raw
 
@@ -1235,7 +1235,7 @@ def test_opencode_session_is_injected_without_touching_gpt_requests() -> None:
     assert json.loads(first_body)["extra_headers"]["x-opencode-session"] == first_session
     assert first_session == second_session
 
-    gpt = {"model": "gpt-5.6-luna", "input": []}
+    gpt = {"model": "gpt-6-luna", "input": []}
     unchanged, gpt_session = proxy.ensure_opencode_session(
         json.dumps(gpt).encode(),
         {"x-opencode-session": "must-not-be-added"},
@@ -1259,7 +1259,7 @@ def test_set_opencode_session_replaces_embedded_epoch_without_touching_gpt() -> 
         "x-opencode-session": "new-session",
     }
 
-    gpt = {"model": "gpt-5.6-luna", "extra_headers": {"x-client": "keep"}}
+    gpt = {"model": "gpt-6-luna", "extra_headers": {"x-client": "keep"}}
     assert proxy.set_opencode_session(json.dumps(gpt).encode(), "must-not-apply") == json.dumps(
         gpt
     ).encode()

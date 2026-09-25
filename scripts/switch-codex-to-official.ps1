@@ -28,7 +28,8 @@ $GatewayConfig = Get-Content -LiteralPath $GatewayConfigPath -Raw | ConvertFrom-
 $GatewayPorts = @(
     [int]$GatewayConfig.ports.core,
     [int]$GatewayConfig.ports.agent,
-    [int]$GatewayConfig.ports.responses
+    [int]$GatewayConfig.ports.responses,
+    [int]$GatewayConfig.ports.chat
 )
 $CodexConfig = Join-Path $env:USERPROFILE ".codex\config.toml"
 $BackupPath = $null

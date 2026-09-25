@@ -3,7 +3,8 @@
   "ports": {
     "core": 4100,
     "agent": 4101,
-    "responses": 4102
+    "responses": 4102,
+    "chat": 4103
   },
   "models_file": "core/models.yaml",
   "control_plane_backend": "https://chatgpt.com/backend-api/codex"

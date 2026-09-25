@@ -1,8 +1,8 @@
 """Unified loopback entry for agent clients.
 
-Port assignment is supplied by the gateway configuration: chat traffic and the
-model catalog go to the core; Responses traffic goes to the Responses service.
-Request and response bodies are streamed or forwarded without being logged.
+Port assignment is supplied by the gateway configuration: Responses traffic
+goes to the Responses service, Chat Completions to its protocol service, and
+the model catalog to Core. Bodies are not logged.
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ from llm_gateway.config import load_model_routes, protocol_models
 log = logging.getLogger("agent-gateway")
 CORE_URL_KEY = web.AppKey("core_url", str)
 RESPONSES_URL_KEY = web.AppKey("responses_url", str)
+CHAT_URL_KEY = web.AppKey("chat_url", str)
 CHAT_MODELS_KEY = web.AppKey("chat_models", set[str])
 SESSION_KEY = web.AppKey("session", aiohttp.ClientSession)
 RESPONSES_PATH = "/v1/responses"
@@ -48,8 +49,10 @@ def is_control_plane_path(path: str) -> bool:
     return path == CONTROL_PLANE_PREFIX or path.startswith(f"{CONTROL_PLANE_PREFIX}/")
 
 
-def select_backend(path: str, core_url: str, responses_url: str) -> str | None:
-    if path == CHAT_PATH or path == MODELS_PATH or path == HEALTH_PATH:
+def select_backend(path: str, core_url: str, responses_url: str, chat_url: str) -> str | None:
+    if path == CHAT_PATH:
+        return chat_url
+    if path == MODELS_PATH or path == HEALTH_PATH:
         return core_url
     if path == RESPONSES_PATH or is_control_plane_path(path):
         return responses_url
@@ -74,7 +77,8 @@ def forward_headers(headers: Mapping[str, str]) -> dict[str, str]:
 async def handle(request: web.Request):
     core_url = request.app[CORE_URL_KEY]
     responses_url = request.app[RESPONSES_URL_KEY]
-    backend = select_backend(request.path, core_url, responses_url)
+    chat_url = request.app[CHAT_URL_KEY]
+    backend = select_backend(request.path, core_url, responses_url, chat_url)
     if backend is None or request.method not in {"GET", "POST"}:
         return web.json_response(
             {"error": {"type": "not_found", "message": "path is not served by the agent entry"}},
@@ -150,10 +154,16 @@ async def _close_session(app: web.Application) -> None:
     await app[SESSION_KEY].close()
 
 
-def create_app(core_url: str, responses_url: str, chat_models: set[str] | None = None):
+def create_app(
+    core_url: str,
+    responses_url: str,
+    chat_url: str,
+    chat_models: set[str] | None = None,
+):
     app = web.Application(client_max_size=128 * 1024 * 1024)
     app[CORE_URL_KEY] = core_url
     app[RESPONSES_URL_KEY] = responses_url
+    app[CHAT_URL_KEY] = chat_url
     app[CHAT_MODELS_KEY] = chat_models or set()
     app.router.add_route("*", "/{tail:.*}", handle)
     app.on_startup.append(_start_session)
@@ -167,13 +177,14 @@ def main() -> None:
     parser.add_argument("--port", required=True, type=int)
     parser.add_argument("--core-url", required=True)
     parser.add_argument("--responses-url", required=True)
+    parser.add_argument("--chat-url", required=True)
     parser.add_argument("--models-config", required=True)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     routes = load_model_routes(args.models_config)
     _, chat_models = protocol_models(routes)
     web.run_app(
-        create_app(args.core_url, args.responses_url, chat_models),
+        create_app(args.core_url, args.responses_url, args.chat_url, chat_models),
         host=args.host,
         port=args.port,
         access_log=None,

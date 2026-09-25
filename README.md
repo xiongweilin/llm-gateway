@@ -2,9 +2,9 @@
 
 [![CI](https://github.com/xiongweilin/llm-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/xiongweilin/llm-gateway/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A self-owned model-routing core with one stable Agent entry and a dedicated
-Responses protocol service. Provider routing and protocol compatibility are
-implemented in this repository.
+A self-owned model-routing core with one stable Agent entry and dedicated
+Responses and Chat Completions protocol services. Provider routing and protocol
+compatibility are implemented in this repository.
 
 ## Service topology
 
@@ -13,18 +13,22 @@ Agent clients
      │
      ▼
 4101  Unified Agent entry
-     ├── Chat Completions ──────────────► 4100  Core
-     └── Responses protocol ────────────► 4102  Responses service
-                                               │
-                                               └────────► 4100  Core ──► provider API
+     ├── Responses ─────────────────────► 4102  Responses service ─┐
+     └── Chat Completions ──────────────► 4103  Chat service ──────┴──► 4100 Core ──► provider API
 ```
 
 - **4100 — Core:** owns route selection, provider credentials, outbound model
-  requests, rate-limit retries, model catalog, and health.
+  requests, rate-limit retries, model catalog, and health. It applies the
+  legacy Codex upstream-header contract instead of forwarding arbitrary client
+  headers to providers.
 - **4101 — Unified Agent entry:** the single local endpoint for agent clients;
-  dispatches requests by protocol and exposes the combined model catalog.
-- **4102 — Responses protocol:** owns Responses-specific compatibility,
-  streaming, compaction, and translation for chat-only routes.
+  dispatches Responses and Chat requests to their protocol services and exposes
+  the combined model catalog.
+- **4102 — Responses protocol:** owns Responses-only compatibility, streaming,
+  and compaction before forwarding to Core. It immediately forwards streamed
+  SSE events and does not translate Responses to Chat Completions.
+- **4103 — Chat Completions protocol:** preserves Chat request/response and SSE
+  streaming semantics while forwarding to Core.
 
 All listeners bind to the host and ports declared in `config/gateway.json`.
 The default host is loopback. The port roles are defined there once and are
@@ -48,7 +52,7 @@ uv sync --project core --locked --group dev
 pwsh -NoProfile -File .\scripts\start-agent-gateway.ps1
 ```
 
-Stop the three local services with:
+Stop the four local services with:
 
 ```powershell
 pwsh -NoProfile -File .\scripts\stop-agent-gateway.ps1

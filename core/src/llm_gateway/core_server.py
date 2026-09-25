@@ -30,6 +30,15 @@ HOP_BY_HOP_HEADERS = {
     "host",
     "transfer-encoding",
 }
+LEGACY_CODEX_UPSTREAM_HEADERS = {
+    "accept",
+    "authorization",
+    "chatgpt-account-id",
+    "content-type",
+    "originator",
+    "session_id",
+    "user-agent",
+}
 
 
 def normalize_opencode_tool_schemas(data: dict[str, Any]) -> int:
@@ -125,10 +134,13 @@ def build_upstream_headers(
     environ: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     env = os.environ if environ is None else environ
+    allowed_headers = LEGACY_CODEX_UPSTREAM_HEADERS
+    if route.compatibility == "opencode-go":
+        allowed_headers = allowed_headers | {"x-opencode-session"}
     headers = {
         key: value
         for key, value in request_headers.items()
-        if key.lower() not in HOP_BY_HOP_HEADERS
+        if key.lower() in allowed_headers
     }
     headers["Accept-Encoding"] = "identity"
     if route.api_key_env:

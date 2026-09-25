@@ -14,20 +14,26 @@ SPEC.loader.exec_module(gateway)
 def test_agent_entry_routes_each_role_to_the_configured_service() -> None:
     core = "http://127.0.0.1:port-core"
     responses = "http://127.0.0.1:port-responses"
+    chat = "http://127.0.0.1:port-chat"
 
-    assert gateway.select_backend("/v1/chat/completions", core, responses) == core
-    assert gateway.select_backend("/v1/models", core, responses) == core
-    assert gateway.select_backend("/health/liveliness", core, responses) == core
-    assert gateway.select_backend("/v1/responses", core, responses) == responses
-    assert gateway.select_backend("/v1/alpha/search", core, responses) == responses
-    assert gateway.select_backend("/v1/alpha2/search", core, responses) is None
-    assert gateway.select_backend("/unsupported", core, responses) is None
+    assert gateway.select_backend("/v1/chat/completions", core, responses, chat) == chat
+    assert gateway.select_backend("/v1/models", core, responses, chat) == core
+    assert gateway.select_backend("/health/liveliness", core, responses, chat) == core
+    assert gateway.select_backend("/v1/responses", core, responses, chat) == responses
+    assert gateway.select_backend("/v1/alpha/search", core, responses, chat) == responses
+    assert gateway.select_backend("/v1/alpha2/search", core, responses, chat) is None
+    assert gateway.select_backend("/unsupported", core, responses, chat) is None
 
 
 def test_gateway_configuration_assigns_requested_ports() -> None:
     config = json.loads((ROOT / "config" / "gateway.json").read_text(encoding="utf-8"))
 
-    assert config["ports"] == {"core": 4100, "agent": 4101, "responses": 4102}
+    assert config["ports"] == {
+        "core": 4100,
+        "agent": 4101,
+        "responses": 4102,
+        "chat": 4103,
+    }
 
 
 def test_agent_entry_preserves_forwarded_headers_and_query() -> None:

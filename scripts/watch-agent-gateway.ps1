@@ -1,4 +1,4 @@
-# Monitor the model core, unified Agent entry, and Responses protocol service.
+# Monitor the model core, unified Agent entry, Responses service, and Chat service.
 # The filename is retained for the existing scheduled task.
 
 #Requires -Version 7.0
@@ -19,7 +19,8 @@ $ListenHost = [string]$GatewayConfig.listen_host
 $ServicePorts = @(
     [int]$GatewayConfig.ports.core,
     [int]$GatewayConfig.ports.agent,
-    [int]$GatewayConfig.ports.responses
+    [int]$GatewayConfig.ports.responses,
+    [int]$GatewayConfig.ports.chat
 )
 $PwshExe = Join-Path $PSHOME 'pwsh.exe'
 $LogRoot = Join-Path ([IO.Path]::GetTempPath()) 'llm-gateway-watchdog'

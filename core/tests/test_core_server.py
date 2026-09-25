@@ -5,7 +5,7 @@ import asyncio
 from aiohttp.test_utils import TestClient, TestServer
 
 from llm_gateway.config import ModelRoute, load_model_routes, protocol_models
-from llm_gateway.core_server import create_app
+from llm_gateway.core_server import build_upstream_headers, create_app
 from fake_provider import FakeProviderServer
 
 
@@ -49,6 +49,63 @@ def test_core_forwards_responses_to_the_configured_provider(monkeypatch) -> None
         assert records[0]["auth_scheme"] == "Bearer"
     finally:
         provider.stop()
+
+
+def test_codex_upstream_headers_match_the_historical_provider_header_contract() -> None:
+    route = ModelRoute(
+        id="codex-model",
+        mode="responses",
+        upstream_model="provider-model",
+        api_base="https://provider.example/v1",
+    )
+    request_headers = {
+        "Authorization": "Bearer synthetic-chatgpt-session",
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+        "Originator": "codex_exec_cli_rs",
+        "User-Agent": "codex-test/1.0",
+        "session_id": "synthetic-session-id",
+        "ChatGPT-Account-Id": "synthetic-account-id",
+        "x-openai-internal-codex-responses-lite": "synthetic-internal-value",
+        "x-codex-test-header": "not-forwarded",
+        "x-forwarded-for": "192.0.2.1",
+    }
+
+    actual = build_upstream_headers(request_headers, route)
+
+    assert actual == {
+        "Authorization": "Bearer synthetic-chatgpt-session",
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+        "Originator": "codex_exec_cli_rs",
+        "User-Agent": "codex-test/1.0",
+        "session_id": "synthetic-session-id",
+        "ChatGPT-Account-Id": "synthetic-account-id",
+        "Accept-Encoding": "identity",
+    }
+
+
+def test_opencode_route_preserves_its_gateway_session_header_only() -> None:
+    route = ModelRoute(
+        id="opencode-model",
+        mode="responses",
+        upstream_model="provider-model",
+        api_base="https://provider.example/v1",
+        compatibility="opencode-go",
+    )
+
+    actual = build_upstream_headers(
+        {
+            "x-opencode-session": "synthetic-session",
+            "x-openai-internal-codex-responses-lite": "synthetic-private-value",
+        },
+        route,
+    )
+
+    assert actual == {
+        "x-opencode-session": "synthetic-session",
+        "Accept-Encoding": "identity",
+    }
 
 
 def test_core_rejects_a_model_on_the_wrong_protocol() -> None:

@@ -11,6 +11,7 @@ $ListenHost = [string]$GatewayConfig.listen_host
 $Ports = @(
     @{ Port = [int]$GatewayConfig.ports.agent; Label = 'unified Agent entry' },
     @{ Port = [int]$GatewayConfig.ports.responses; Label = 'Responses protocol service' },
+    @{ Port = [int]$GatewayConfig.ports.chat; Label = 'Chat Completions service' },
     @{ Port = [int]$GatewayConfig.ports.core; Label = 'model routing core' }
 )
 
