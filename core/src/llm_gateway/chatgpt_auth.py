@@ -91,7 +91,9 @@ def _candidate_auth_files(
     codex_auth = codex_home / "auth.json"
 
     result: list[Path] = []
-    for path in (litellm_auth, codex_auth):
+    # The active Codex login is the authoritative subscription identity.
+    # Keep the historical LiteLLM token store only as a migration fallback.
+    for path in (codex_auth, litellm_auth):
         resolved = path.resolve(strict=False)
         if resolved not in result:
             result.append(resolved)
