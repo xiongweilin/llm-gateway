@@ -162,7 +162,7 @@ def test_codex_legacy_and_new_chains_match_provider_contract_and_first_sse_event
                             request_body = {
                                 "model": "codex-model",
                                 "input": [{"role": "user", "content": "same request"}],
-                                "stream": False,
+                                "stream": True,
                                 "store": True,
                                 "metadata": {"must_be_filtered": True},
                             }
