@@ -14,9 +14,9 @@ Set-StrictMode -Version Latest
 $Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $StartScript = Join-Path $Root 'scripts\start-agent-gateway.ps1'
 $PwshExe = Join-Path $PSHOME 'pwsh.exe'
-$LogRoot = Join-Path ([IO.Path]::GetTempPath()) 'litellm-gateway-watchdog'
+$LogRoot = Join-Path ([IO.Path]::GetTempPath()) 'llm-gateway-watchdog'
 $LogPath = Join-Path $LogRoot 'watchdog.log'
-$MutexName = 'Local\LiteLLM-Gateway-Watchdog'
+$MutexName = 'Local\LLM-Gateway-Watchdog'
 
 if (-not (Test-Path -LiteralPath $StartScript -PathType Leaf)) {
     throw "startup script is missing: $StartScript"
