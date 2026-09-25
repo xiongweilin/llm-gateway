@@ -5,19 +5,20 @@ from pathlib import Path
 
 from aiohttp.test_utils import TestClient, TestServer
 
+from llm_gateway.chatgpt_auth import ChatGPTCredentials
 from llm_gateway.config import ModelRoute, load_model_routes, protocol_models
 from llm_gateway.core_server import build_upstream_headers, create_app
 from fake_provider import FakeProviderServer
 
 
 
-def test_production_codex_routes_use_client_auth_and_pinned_chatgpt_backend(monkeypatch) -> None:
+def test_production_codex_routes_use_chatgpt_auth_and_pinned_chatgpt_backend(monkeypatch) -> None:
     monkeypatch.setenv("CHATGPT_API_BASE", "https://api.openai.com/v1")
     routes = load_model_routes(Path(__file__).parents[1] / "models.yaml")
 
     for model_id in ("gpt-6-sol", "gpt-6-luna"):
         route = routes[model_id]
-        assert route.authorization == "client"
+        assert route.authorization == "chatgpt"
         assert route.api_base == "https://chatgpt.com/backend-api/codex"
 
 
@@ -63,28 +64,35 @@ def test_core_forwards_responses_to_the_configured_provider(monkeypatch) -> None
         provider.stop()
 
 
-def test_codex_route_preserves_client_subscription_auth() -> None:
+def test_codex_route_replaces_client_auth_with_litellm_compatible_chatgpt_auth() -> None:
     route = ModelRoute(
         id="codex-model",
         mode="responses",
         upstream_model="provider-model",
         api_base="https://chatgpt.com/backend-api/codex",
-        authorization="client",
+        authorization="chatgpt",
     )
     request_headers = {
-        "Authorization": "Bearer subscription-oauth-token",
+        "Authorization": "Bearer sk-svcacct-client-placeholder",
         "Content-Type": "application/json",
         "Accept": "text/event-stream",
         "Originator": "codex_exec_cli_rs",
         "User-Agent": "codex-test/1.0",
         "session_id": "synthetic-session-id",
-        "ChatGPT-Account-Id": "subscription-account-id",
+        "ChatGPT-Account-Id": "client-account-id",
         "x-openai-internal-codex-responses-lite": "synthetic-internal-value",
         "x-codex-test-header": "not-forwarded",
         "x-forwarded-for": "192.0.2.1",
     }
 
-    actual = build_upstream_headers(request_headers, route)
+    actual = build_upstream_headers(
+        request_headers,
+        route,
+        chatgpt_credentials=ChatGPTCredentials(
+            access_token="subscription-oauth-token",
+            account_id="subscription-account-id",
+        ),
+    )
 
     assert actual == {
         "Authorization": "Bearer subscription-oauth-token",
