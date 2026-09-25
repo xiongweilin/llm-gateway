@@ -1,5 +1,6 @@
-# Gateway-owned model routes. Credentials are read from environment variables;
-# no provider secret is stored in this file.
+# Gateway-owned model routes. Credential sources are external to this file:
+# ChatGPT OAuth uses ~/.config/llm/chatgpt/auth.json; other provider secrets
+# use their configured environment variables.
 models:
   - id: gpt-6-sol
     mode: responses
