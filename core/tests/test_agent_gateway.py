@@ -25,6 +25,27 @@ def test_agent_entry_routes_each_role_to_the_configured_service() -> None:
     assert gateway.select_backend("/unsupported", core, responses, chat) is None
 
 
+def test_agent_entry_rejects_responses_websocket_upgrade_for_http_fallback() -> None:
+    assert gateway.is_responses_websocket_upgrade(
+        "GET",
+        "/v1/responses",
+        {
+            "Connection": "Upgrade",
+            "Upgrade": "websocket",
+        },
+    )
+    assert not gateway.is_responses_websocket_upgrade(
+        "POST",
+        "/v1/responses",
+        {"Upgrade": "websocket"},
+    )
+    assert not gateway.is_responses_websocket_upgrade(
+        "GET",
+        "/v1/chat/completions",
+        {"Upgrade": "websocket"},
+    )
+
+
 def test_gateway_configuration_assigns_requested_ports() -> None:
     config = json.loads((ROOT / "config" / "gateway.json").read_text(encoding="utf-8"))
 

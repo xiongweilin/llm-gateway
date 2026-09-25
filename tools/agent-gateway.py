@@ -74,7 +74,27 @@ def forward_headers(headers: Mapping[str, str]) -> dict[str, str]:
     return result
 
 
+def is_responses_websocket_upgrade(
+    method: str,
+    path: str,
+    headers: Mapping[str, str],
+) -> bool:
+    if method != "GET" or path != RESPONSES_PATH:
+        return False
+    return any(
+        key.lower() == "upgrade" and value.strip().lower() == "websocket"
+        for key, value in headers.items()
+    )
+
+
 async def handle(request: web.Request):
+    if is_responses_websocket_upgrade(request.method, request.path, request.headers):
+        return web.Response(
+            status=426,
+            headers={"Upgrade": "websocket"},
+            text="Responses WebSocket transport is not supported; retry over HTTP.",
+        )
+
     core_url = request.app[CORE_URL_KEY]
     responses_url = request.app[RESPONSES_URL_KEY]
     chat_url = request.app[CHAT_URL_KEY]
