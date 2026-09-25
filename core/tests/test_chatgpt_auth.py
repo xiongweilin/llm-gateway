@@ -18,7 +18,7 @@ def _jwt(payload: dict) -> str:
     return f"header.{encoded}.signature"
 
 
-def test_chatgpt_auth_reads_codex_subscription_login(tmp_path) -> None:
+def test_chatgpt_auth_reads_llm_subscription_login(tmp_path) -> None:
     auth_file = tmp_path / "auth.json"
     access_token = _jwt(
         {
@@ -31,14 +31,11 @@ def test_chatgpt_auth_reads_codex_subscription_login(tmp_path) -> None:
     auth_file.write_text(
         json.dumps(
             {
-                "auth_mode": "chatgpt",
-                "OPENAI_API_KEY": "client-api-key-must-not-be-used",
-                "tokens": {
-                    "access_token": access_token,
-                    "refresh_token": "refresh-token",
-                    "id_token": "id-token",
-                    "account_id": "subscription-account-id",
-                },
+                "access_token": access_token,
+                "refresh_token": "refresh-token",
+                "id_token": access_token,
+                "expires_at": int(time.time()) + 3600,
+                "account_id": "subscription-account-id",
             }
         ),
         encoding="utf-8",
@@ -56,7 +53,7 @@ def test_chatgpt_auth_reads_codex_subscription_login(tmp_path) -> None:
     asyncio.run(exercise())
 
 
-def test_chatgpt_auth_refreshes_expired_codex_login(tmp_path) -> None:
+def test_chatgpt_auth_refreshes_expired_llm_login(tmp_path) -> None:
     auth_file = tmp_path / "auth.json"
     expired = _jwt({"exp": int(time.time()) - 60})
     refreshed = _jwt(
@@ -70,12 +67,10 @@ def test_chatgpt_auth_refreshes_expired_codex_login(tmp_path) -> None:
     auth_file.write_text(
         json.dumps(
             {
-                "auth_mode": "chatgpt",
-                "tokens": {
-                    "access_token": expired,
-                    "refresh_token": "old-refresh-token",
-                    "id_token": expired,
-                },
+                "access_token": expired,
+                "refresh_token": "old-refresh-token",
+                "id_token": expired,
+                "expires_at": int(time.time()) - 60,
             }
         ),
         encoding="utf-8",
@@ -108,15 +103,15 @@ def test_chatgpt_auth_refreshes_expired_codex_login(tmp_path) -> None:
 
     asyncio.run(exercise())
     saved = json.loads(auth_file.read_text(encoding="utf-8"))
-    assert saved["tokens"]["refresh_token"] == "new-refresh-token"
-    assert saved["tokens"]["access_token"] == refreshed
-    assert "last_refresh" in saved
+    assert saved["refresh_token"] == "new-refresh-token"
+    assert saved["access_token"] == refreshed
+    assert saved["account_id"] == "refreshed-account-id"
 
 
-def test_default_auth_store_matches_litellm_contract(tmp_path) -> None:
-    env = {"CHATGPT_TOKEN_DIR": str(tmp_path)}
-    assert _candidate_auth_files(env, None) == [
-        (tmp_path / "auth.json").resolve(strict=False)
+def test_default_auth_store_matches_llm_contract(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr("llm_gateway.chatgpt_auth.Path.home", lambda: tmp_path)
+    assert _candidate_auth_files({}, None) == [
+        (tmp_path / ".config" / "llm" / "chatgpt" / "auth.json").resolve(strict=False)
     ]
 
 
