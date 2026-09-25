@@ -16,8 +16,11 @@ for directory in (TOOLS, CORE_SRC):
     if str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
 
+from llm_gateway.chatgpt_auth import ChatGPTCredentials
 from llm_gateway.config import ModelRoute
-from llm_gateway.core_server import create_app as create_core_app
+import llm_gateway.core_server as core_server
+
+create_core_app = core_server.create_app
 
 
 def _load_script_module(name: str, filename: str):
@@ -60,7 +63,9 @@ async def _collect_events(response: web.Response, started_at: float) -> tuple[li
     return event_types, first_event_latency
 
 
-def test_codex_legacy_and_new_chains_match_upstream_headers_and_first_sse_event() -> None:
+def test_codex_legacy_and_new_chains_match_provider_contract_and_first_sse_event(
+    monkeypatch,
+) -> None:
     provider_observations: list[dict] = []
 
     async def provider(request: web.Request) -> web.StreamResponse:
@@ -71,6 +76,7 @@ def test_codex_legacy_and_new_chains_match_upstream_headers_and_first_sse_event(
                 for key, value in received.items()
                 if key not in {"host", "content-length", "connection"}
             },
+            "body": await request.json(),
             "codex_internal_headers": sorted(
                 key for key in received if key.startswith("x-openai-internal-codex-")
             ),
@@ -102,9 +108,21 @@ def test_codex_legacy_and_new_chains_match_upstream_headers_and_first_sse_event(
                     mode="responses",
                     upstream_model="codex-model",
                     api_base=f"{provider_url}/v1",
-                    authorization="client",
+                    authorization="chatgpt",
                 )
             }
+
+            async def fake_chatgpt_credentials(_session):
+                return ChatGPTCredentials(
+                    access_token="subscription-oauth-token",
+                    account_id="subscription-account-id",
+                )
+
+            monkeypatch.setattr(
+                core_server,
+                "get_chatgpt_credentials",
+                fake_chatgpt_credentials,
+            )
 
             async with TestClient(TestServer(create_core_app(routes))) as core_client:
                 core_url = str(core_client.make_url("/")).rstrip("/")
@@ -144,20 +162,39 @@ def test_codex_legacy_and_new_chains_match_upstream_headers_and_first_sse_event(
                             request_body = {
                                 "model": "codex-model",
                                 "input": [{"role": "user", "content": "same request"}],
-                                "stream": True,
+                                "stream": False,
+                                "store": True,
+                                "metadata": {"must_be_filtered": True},
                             }
                             legacy_headers = {
                                 key: value
                                 for key, value in request_headers.items()
                                 if key.lower() in LEGACY_CLIENT_HEADERS
+                                and key.lower() not in {
+                                    "authorization",
+                                    "chatgpt-account-id",
+                                }
                             }
+                            legacy_headers["Authorization"] = (
+                                "Bearer subscription-oauth-token"
+                            )
+                            legacy_headers["ChatGPT-Account-Id"] = (
+                                "subscription-account-id"
+                            )
                             legacy_headers["Accept-Encoding"] = "identity"
+                            legacy_body = {
+                                "model": "codex-model",
+                                "input": request_body["input"],
+                                "stream": True,
+                                "store": False,
+                                "include": ["reasoning.encrypted_content"],
+                            }
 
                             async with ClientSession(trust_env=False) as legacy_session:
                                 legacy_started = time.monotonic()
                                 async with legacy_session.post(
                                     f"{provider_url}/v1/responses",
-                                    json=request_body,
+                                    json=legacy_body,
                                     headers=legacy_headers,
                                 ) as legacy_response:
                                     assert legacy_response.status == 200
@@ -185,10 +222,14 @@ def test_codex_legacy_and_new_chains_match_upstream_headers_and_first_sse_event(
             key.lower(): value
             for key, value in request_headers.items()
             if key.lower() in LEGACY_CLIENT_HEADERS
+            and key.lower() not in {"authorization", "chatgpt-account-id"}
         }
+        expected_headers["authorization"] = "Bearer subscription-oauth-token"
+        expected_headers["chatgpt-account-id"] = "subscription-account-id"
         expected_headers["accept-encoding"] = "identity"
         for observation in provider_observations:
             assert observation["headers"] == expected_headers
+            assert observation["body"] == legacy_body
             assert observation["codex_internal_headers"] == []
             assert len(observation["event_write_times"]) == len(EVENT_TYPES)
 
