@@ -11,6 +11,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
+from llm_gateway.chatgpt_auth import ChatGPTCredentials, get_chatgpt_credentials
 from llm_gateway.config import ModelRoute, load_model_routes
 
 
@@ -132,6 +133,7 @@ def build_upstream_headers(
     request_headers: Mapping[str, str],
     route: ModelRoute,
     environ: Mapping[str, str] | None = None,
+    chatgpt_credentials: ChatGPTCredentials | None = None,
 ) -> dict[str, str]:
     env = os.environ if environ is None else environ
     allowed_headers = LEGACY_CODEX_UPSTREAM_HEADERS
@@ -151,6 +153,15 @@ def build_upstream_headers(
             if key.lower() == "authorization":
                 del headers[key]
         headers["Authorization"] = f"Bearer {api_key}"
+    elif route.authorization == "chatgpt":
+        if chatgpt_credentials is None:
+            raise RuntimeError("ChatGPT subscription credential was not resolved")
+        for key in tuple(headers):
+            if key.lower() in {"authorization", "chatgpt-account-id"}:
+                del headers[key]
+        headers["Authorization"] = f"Bearer {chatgpt_credentials.access_token}"
+        if chatgpt_credentials.account_id:
+            headers["ChatGPT-Account-Id"] = chatgpt_credentials.account_id
     elif route.authorization == "none":
         for key in tuple(headers):
             if key.lower() == "authorization":
@@ -175,8 +186,22 @@ async def _proxy_response(
     session: aiohttp.ClientSession,
     payload: bytes,
 ):
+    chatgpt_credentials = None
+    if route.authorization == "chatgpt":
+        try:
+            chatgpt_credentials = await get_chatgpt_credentials(session)
+        except RuntimeError as exc:
+            return web.json_response(
+                {"error": {"type": "configuration_error", "message": str(exc)}},
+                status=503,
+            )
+
     try:
-        headers = build_upstream_headers(request.headers, route)
+        headers = build_upstream_headers(
+            request.headers,
+            route,
+            chatgpt_credentials=chatgpt_credentials,
+        )
     except RuntimeError as exc:
         return web.json_response(
             {"error": {"type": "configuration_error", "message": str(exc)}},

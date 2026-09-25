@@ -51,7 +51,7 @@ def load_model_routes(path: str | Path) -> dict[str, ModelRoute]:
         compatibility = entry.get("compatibility")
         if api_key_env is not None and (not isinstance(api_key_env, str) or not api_key_env):
             raise ValueError(f"invalid api_key_env for {model_id}")
-        if authorization not in {"client", "none"}:
+        if authorization not in {"client", "none", "chatgpt"}:
             raise ValueError(f"unsupported authorization source for {model_id}")
         if compatibility not in {None, "opencode-go"}:
             raise ValueError(f"unsupported compatibility profile for {model_id}")

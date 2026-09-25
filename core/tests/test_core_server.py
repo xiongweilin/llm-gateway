@@ -4,6 +4,7 @@ import asyncio
 
 from aiohttp.test_utils import TestClient, TestServer
 
+from llm_gateway.chatgpt_auth import ChatGPTCredentials
 from llm_gateway.config import ModelRoute, load_model_routes, protocol_models
 from llm_gateway.core_server import build_upstream_headers, create_app
 from fake_provider import FakeProviderServer
@@ -51,36 +52,44 @@ def test_core_forwards_responses_to_the_configured_provider(monkeypatch) -> None
         provider.stop()
 
 
-def test_codex_upstream_headers_match_the_historical_provider_header_contract() -> None:
+def test_chatgpt_route_replaces_client_auth_with_subscription_oauth() -> None:
     route = ModelRoute(
         id="codex-model",
         mode="responses",
         upstream_model="provider-model",
-        api_base="https://provider.example/v1",
+        api_base="https://chatgpt.com/backend-api/codex",
+        authorization="chatgpt",
     )
     request_headers = {
-        "Authorization": "Bearer synthetic-chatgpt-session",
+        "Authorization": "Bearer client-service-key",
         "Content-Type": "application/json",
         "Accept": "text/event-stream",
         "Originator": "codex_exec_cli_rs",
         "User-Agent": "codex-test/1.0",
         "session_id": "synthetic-session-id",
-        "ChatGPT-Account-Id": "synthetic-account-id",
+        "ChatGPT-Account-Id": "client-account-id",
         "x-openai-internal-codex-responses-lite": "synthetic-internal-value",
         "x-codex-test-header": "not-forwarded",
         "x-forwarded-for": "192.0.2.1",
     }
 
-    actual = build_upstream_headers(request_headers, route)
+    actual = build_upstream_headers(
+        request_headers,
+        route,
+        chatgpt_credentials=ChatGPTCredentials(
+            access_token="subscription-oauth-token",
+            account_id="subscription-account-id",
+        ),
+    )
 
     assert actual == {
-        "Authorization": "Bearer synthetic-chatgpt-session",
+        "Authorization": "Bearer subscription-oauth-token",
         "Content-Type": "application/json",
         "Accept": "text/event-stream",
         "Originator": "codex_exec_cli_rs",
         "User-Agent": "codex-test/1.0",
         "session_id": "synthetic-session-id",
-        "ChatGPT-Account-Id": "synthetic-account-id",
+        "ChatGPT-Account-Id": "subscription-account-id",
         "Accept-Encoding": "identity",
     }
 
@@ -166,6 +175,7 @@ models:
     upstream_model: remote-response-model
     api_base: https://default.example/v1
     api_base_env: TEST_PROVIDER_BASE
+    authorization: chatgpt
   - id: chat-model
     mode: chat
     upstream_model: remote-chat-model
@@ -180,3 +190,4 @@ models:
     assert responses == {"response-model"}
     assert chat == {"chat-model"}
     assert routes["response-model"].api_base == "https://override.example/v1"
+    assert routes["response-model"].authorization == "chatgpt"

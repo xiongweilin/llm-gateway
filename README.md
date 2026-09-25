@@ -37,10 +37,13 @@ consumed by the runtime scripts.
 ## Model routes
 
 `core/models.yaml` is the route source of truth. Each entry declares the public
-model id, protocol mode, provider model id, API base, and credential variable
-name. Credential values are read from the process environment and are never
-stored in the route file. `api_base_env` allows the provider endpoint to be
-overridden without editing code.
+model id, protocol mode, provider model id, API base, and authorization source.
+Credential values are never stored in the route file. `api_base_env` allows
+the provider endpoint to be overridden without editing code. Routes using
+`authorization: chatgpt` use the ChatGPT subscription OAuth login rather than
+the client request's API key. Core first reuses the historical LiteLLM token
+store and then the active Codex login at `~/.codex/auth.json`; expired OAuth
+tokens are refreshed without logging or exposing credential values.
 
 The Core sends requests directly to the configured provider API. The public
 model id remains stable while `upstream_model` selects the provider-side model.
