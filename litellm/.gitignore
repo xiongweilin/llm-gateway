@@ -1,5 +1,0 @@
-*.agent-gateway.pid
-*.agent-proxy.pid
-.agent-gateway*.log
-.agent-proxy*.log
-.agent-gw-start*

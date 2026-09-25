@@ -1,17 +1,11 @@
-"""统一 Responses/Chat 协议与 control-plane 传输桥。
+"""Responses protocol adapter and control-plane compatibility transport.
 
-背景：部分客户端把 /v1/responses 请求体以 `Content-Encoding: zstd`
-发送；LiteLLM(FastAPI) 不解压请求体，导致 model 字段解析失败（400
-model=None）。本代理在 127.0.0.1:4100 收取两种 OpenAI 协议请求，zstd 解压
-后转发到 LiteLLM（默认 127.0.0.1:4101），并流式回传 SSE 响应。Responses
-请求命中普通 chat mode 模型时，在此转换为 Chat Completions 并经 4102 转发。
-
-网页搜索等 control-plane 请求使用 `/v1/alpha/*`，不属于 LiteLLM 的模型
-API；这些路径旁路到 control-plane upstream，
-并将上游路径映射为 `/alpha/*`。
-
-安全：仅绑定 loopback；不解析/不记录请求与响应内容；不含任何密钥。
+The service runs on the configured Responses port, translates supported
+Responses requests when a route is chat-only, and sends model work to the
+self-owned core. Control-plane extension paths are forwarded separately.
+Only loopback listeners are used; request and response bodies are not logged.
 """
+import argparse
 import asyncio
 import hashlib
 import json
@@ -58,10 +52,8 @@ except ModuleNotFoundError:  # pragma: no cover - direct file loading in tests
 
 log = logging.getLogger("responses-proxy")
 
-# 4100 的最后保护预算。预压缩会先处理 Muse；这个预算仍然防止其他
-# Responses 请求把过长历史直接送入 LiteLLM。
+# Responses request budget after provider-specific compaction handling.
 INPUT_TOKEN_BUDGET = 950_000
-DEFAULT_CONTROL_PLANE_BACKEND = "https://chatgpt.com/backend-api/codex"
 CONTROL_PLANE_PATH_PREFIX = "/v1/alpha"
 OPENCODE_SESSION_HEADER = "x-opencode-session"
 OPENCODE_MODEL_PREFIX = "opencode-go/"
@@ -84,7 +76,7 @@ def _env_int(name: str, default: int, minimum: int) -> int:
     return parsed
 
 
-# These budgets bound the checkpoint that 4100 creates only after Codex emits
+# These budgets bound the checkpoint that the Responses service creates only after Codex emits
 # an explicit compaction trigger. The historical MUSE_* environment names are
 # retained for deployment compatibility; the current behavior applies to DeepSeek Flash only.
 MUSE_COMPACTION_TOKEN_BUDGET = _env_int(
@@ -416,17 +408,17 @@ def has_namespaced_tools(value) -> bool:
 
 
 def is_compatibility_extension_path(path: str) -> bool:
-    """Return whether a non-model compatibility extension belongs on 4100."""
+    """Return whether a control-plane compatibility extension is requested."""
     return path == CONTROL_PLANE_PATH_PREFIX or path.startswith(
         f"{CONTROL_PLANE_PATH_PREFIX}/"
     )
 
 
 def is_allowed_path(path: str, method: str) -> bool:
-    """Expose both public OpenAI protocol paths through one ingress."""
+    """Expose the Responses protocol and control-plane extension paths."""
     if is_compatibility_extension_path(path):
-        return True
-    if path in {RESPONSES_PATH, CHAT_COMPLETIONS_PATH}:
+        return method in {"GET", "POST"}
+    if path == RESPONSES_PATH:
         return method in {"GET", "POST"}
     if path in {MODELS_PATH, HEALTH_PATH}:
         return method == "GET"
@@ -450,7 +442,7 @@ def filter_models_response(body: bytes, allowed_models: set[str]) -> bytes:
 
 
 def is_control_plane_path(path: str) -> bool:
-    """Return whether a Codex control-plane endpoint must bypass LiteLLM."""
+    """Return whether a Codex control-plane endpoint uses the separate backend."""
     return is_compatibility_extension_path(path)
 
 
@@ -2521,8 +2513,9 @@ async def handle(
     control_plane_backend: str | None = None,
     responses_models: set[str] | None = None,
     chat_models: set[str] | None = None,
-    chat_backend: str = "http://127.0.0.1:4102",
+    chat_backend: str | None = None,
 ):
+    chat_backend = chat_backend or backend
     responses_models = responses_models or set()
     chat_models = chat_models or set()
     unified_models = responses_models | chat_models
@@ -2531,7 +2524,7 @@ async def handle(
             {
                 "error": {
                     "type": "invalid_request_error",
-                    "message": "path is not served by the unified protocol ingress",
+                    "message": "path is not served by the Responses service",
                 }
             },
             status=404,
@@ -2556,8 +2549,8 @@ async def handle(
             text='{"error":{"type":"not_found","message":"response not found"}}',
         )
 
-    body = await req.read()
-    dec = decompress(body, req.headers.get("Content-Encoding", ""))
+    # aiohttp decodes supported request encodings before application handlers.
+    dec = await req.read()
     caller_stream = True
     normalize_function_args = False
     namespaced_tools: dict[str, tuple[str, str]] = {}
@@ -2588,7 +2581,7 @@ async def handle(
 
         if req.path == RESPONSES_PATH:
             allowed_models = unified_models
-            error_message = "model is not available on the unified protocol ingress"
+            error_message = "model is not available on the Responses service"
         else:
             allowed_models = chat_models
             error_message = "model is not available on the Chat Completions route"
@@ -3053,51 +3046,49 @@ async def handle(
 
 
 async def main() -> None:
-    listen_port = int(sys.argv[1]) if len(sys.argv) > 1 else 4100
-    backend = sys.argv[2] if len(sys.argv) > 2 else "http://127.0.0.1:4101"
-    control_plane_backend = (
-        sys.argv[3] if len(sys.argv) > 3 else DEFAULT_CONTROL_PLANE_BACKEND
-    )
-    config_path = (
-        sys.argv[4]
-        if len(sys.argv) > 4
-        else str(Path(__file__).resolve().parents[1] / "litellm" / "config.runtime.yaml")
-    )
-    chat_backend = sys.argv[5] if len(sys.argv) > 5 else "http://127.0.0.1:4102"
-    responses_models, chat_models = load_protocol_models(config_path)
+    parser = argparse.ArgumentParser(description="Run the Responses protocol service.")
+    parser.add_argument("--host", required=True)
+    parser.add_argument("--port", required=True, type=int)
+    parser.add_argument("--core-url", required=True)
+    parser.add_argument("--control-plane-backend", required=True)
+    parser.add_argument("--models-config", required=True)
+    args = parser.parse_args()
+    responses_models, chat_models = load_protocol_models(args.models_config)
     unified_models = responses_models | chat_models
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     # 桌面端打开会话会发送完整历史（+工具 schema），超过 aiohttp 默认
     # 1MB 请求体上限会返回 413；调大至 128MB。
     app = aiohttp.web.Application(client_max_size=128 * 1024 * 1024)
     connector = aiohttp.TCPConnector(limit=64)
-    # The Windows host may expose the public ChatGPT control-plane only via
-    # its system proxy.  Keep local 4101 traffic working as well; aiohttp's
-    # proxy discovery bypasses loopback for this host.
+    # Provider/control-plane HTTP may use the host's configured system proxy.
     session = aiohttp.ClientSession(connector=connector, trust_env=True)
+
+    async def route_handler(request):
+        return await handle(
+            request,
+            args.core_url,
+            session,
+            args.control_plane_backend,
+            responses_models,
+            chat_models,
+            args.core_url,
+        )
+
     app.router.add_route(
         "*",
         "/{tail:.*}",
-        lambda r: handle(
-            r,
-            backend,
-            session,
-            control_plane_backend,
-            responses_models,
-            chat_models,
-            chat_backend,
-        ),
+        route_handler,
     )
     runner = aiohttp.web.AppRunner(app)
     await runner.setup()
-    site = aiohttp.web.TCPSite(runner, "127.0.0.1", listen_port)
+    site = aiohttp.web.TCPSite(runner, args.host, args.port)
     await site.start()
     log.info(
-        "Unified protocol ingress listening on 127.0.0.1:%s -> %s; chat -> %s; control-plane -> %s; models=%d",
-        listen_port,
-        backend,
-        chat_backend,
-        control_plane_backend,
+        "Responses protocol service listening on %s:%s -> core %s; control-plane -> %s; models=%d",
+        args.host,
+        args.port,
+        args.core_url,
+        args.control_plane_backend,
         len(unified_models),
     )
     while True:

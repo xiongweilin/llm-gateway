@@ -245,7 +245,7 @@ def test_buffered_responses_stream_emits_text_and_custom_tool_events() -> None:
     assert added_items[1]["input"] == ""
 
 
-def test_unified_ingress_routes_responses_and_chat_to_chat_hop() -> None:
+def test_responses_service_bridges_chat_mode_responses_through_core() -> None:
     async def run() -> None:
         upstream_requests: list[tuple[str, dict, str | None]] = []
 
@@ -280,10 +280,8 @@ def test_unified_ingress_routes_responses_and_chat_to_chat_hop() -> None:
 
         proxy_session = ClientSession()
         proxy_app = web.Application()
-        proxy_app.router.add_route(
-            "*",
-            "/{tail:.*}",
-            lambda request: proxy.handle(
+        async def proxy_handler(request: web.Request):
+            return await proxy.handle(
                 request,
                 upstream_url,
                 proxy_session,
@@ -291,8 +289,8 @@ def test_unified_ingress_routes_responses_and_chat_to_chat_hop() -> None:
                 {"responses-model"},
                 {"chat-model"},
                 upstream_url,
-            ),
-        )
+            )
+        proxy_app.router.add_route("*", "/{tail:.*}", proxy_handler)
         proxy_runner = web.AppRunner(proxy_app)
         await proxy_runner.setup()
         proxy_site = web.TCPSite(proxy_runner, "127.0.0.1", 0)
@@ -314,25 +312,8 @@ def test_unified_ingress_routes_responses_and_chat_to_chat_hop() -> None:
                 response_body = await response.json()
                 assert response_body["output"][0]["content"][0]["text"] == "routed"
 
-                direct_chat = await client.post(
-                    f"http://127.0.0.1:{proxy_port}/v1/chat/completions",
-                    json={
-                        "model": "chat-model",
-                        "messages": [{"role": "user", "content": "hello"}],
-                    },
-                )
-                assert direct_chat.status == 200
-                assert (await direct_chat.json())["choices"][0]["message"]["content"] == "routed"
-
-
-            assert [path for path, _, _ in upstream_requests] == [
-                "/v1/chat/completions",
-                "/v1/chat/completions",
-            ]
+            assert [path for path, _, _ in upstream_requests] == ["/v1/chat/completions"]
             assert upstream_requests[0][1]["messages"] == [
-                {"role": "user", "content": "hello"}
-            ]
-            assert upstream_requests[1][1]["messages"] == [
                 {"role": "user", "content": "hello"}
             ]
         finally:
@@ -343,7 +324,7 @@ def test_unified_ingress_routes_responses_and_chat_to_chat_hop() -> None:
     asyncio.run(run())
 
 
-def test_unified_ingress_sanitizes_tools_lifted_from_additional_tools() -> None:
+def test_responses_service_sanitizes_tools_lifted_from_additional_tools() -> None:
     async def run() -> None:
         upstream_requests: list[dict] = []
 
@@ -374,10 +355,8 @@ def test_unified_ingress_sanitizes_tools_lifted_from_additional_tools() -> None:
 
         proxy_session = ClientSession()
         proxy_app = web.Application()
-        proxy_app.router.add_route(
-            "*",
-            "/{tail:.*}",
-            lambda request: proxy.handle(
+        async def proxy_handler(request: web.Request):
+            return await proxy.handle(
                 request,
                 upstream_url,
                 proxy_session,
@@ -385,8 +364,8 @@ def test_unified_ingress_sanitizes_tools_lifted_from_additional_tools() -> None:
                 {"opencode-go/deepseek-flash"},
                 set(),
                 upstream_url,
-            ),
-        )
+            )
+        proxy_app.router.add_route("*", "/{tail:.*}", proxy_handler)
         proxy_runner = web.AppRunner(proxy_app)
         await proxy_runner.setup()
         proxy_site = web.TCPSite(proxy_runner, "127.0.0.1", 0)

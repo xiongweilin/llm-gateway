@@ -50,22 +50,52 @@ if (-not $Worker) {
     exit $workerProcess.ExitCode
 }
 
-$GatewayRoot = 'D:\agent\litellm-gateway'
-$ControlRoot = 'D:\agent\control-plane'
+$GatewayRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$GatewayConfigPath = Join-Path $GatewayRoot 'config\gateway.json'
+$GatewayConfig = Get-Content -LiteralPath $GatewayConfigPath -Raw | ConvertFrom-Json
+$ListenHost = [string]$GatewayConfig.listen_host
+$CorePort = [int]$GatewayConfig.ports.core
+$AgentPort = [int]$GatewayConfig.ports.agent
+$ResponsesPort = [int]$GatewayConfig.ports.responses
+$GatewayPorts = @($CorePort, $AgentPort, $ResponsesPort)
+$CoreServiceUrl = "http://${ListenHost}:$CorePort"
+$AgentServiceUrl = "http://${ListenHost}:$AgentPort"
+$ResponsesServiceUrl = "http://${ListenHost}:$ResponsesPort"
+$CoreBaseUrl = "$CoreServiceUrl/v1"
+$AgentBaseUrl = "$AgentServiceUrl/v1"
+$ResponsesBaseUrl = "$ResponsesServiceUrl/v1"
+$CodexBaseUrl = $AgentBaseUrl
+$ControlRoot = [Environment]::GetEnvironmentVariable('AIOS_ROOT')
+if ([string]::IsNullOrWhiteSpace($ControlRoot)) { throw 'AIOS_ROOT must identify the AIOS monorepo for Control Plane integration.' }
+$ControlRoot = (Resolve-Path -LiteralPath $ControlRoot).Path
+$ControlPort = 0
+if (-not [int]::TryParse([Environment]::GetEnvironmentVariable('CONTROL_PLANE_PORT'), [ref]$ControlPort) -or $ControlPort -lt 1 -or $ControlPort -gt 65535) {
+    throw 'CONTROL_PLANE_PORT must contain the configured Control Plane port.'
+}
+$ControlBaseUrl = "http://${ListenHost}:$ControlPort"
 $CodexHome = Join-Path $env:USERPROFILE '.codex'
 $CodexConfig = Join-Path $CodexHome 'config.toml'
 $CodexModelCache = Join-Path $CodexHome 'models_cache.json'
 $OfficialModel = 'gpt-6-luna'
-$CodexBaseUrl = 'http://127.0.0.1:4100/v1'
-$LiteLlmBaseUrl = 'http://127.0.0.1:4101/v1'
-$GatewayTask = 'LiteLLM-Agent-Gateway'
+$GatewayTask = 'LLM-Gateway-Agent-Entry'
 $ControlTask = 'ControlPlane'
 $GatewayStart = Join-Path $GatewayRoot 'scripts\start-agent-gateway.ps1'
 $GatewayWatch = Join-Path $GatewayRoot 'scripts\watch-agent-gateway.ps1'
-$ControlPython = Join-Path $ControlRoot '.venv\Scripts\python.exe'
-$ControlConfig = Join-Path $ControlRoot 'control_plane.toml'
-$ControlConfigPy = Join-Path $ControlRoot 'src\control_plane\config.py'
-$ControlAlertPy = Join-Path $ControlRoot 'src\control_plane\alert_policy.py'
+$GatewayWatchPattern = [regex]::Escape($GatewayWatch)
+$ExistingGatewayTask = Get-ScheduledTask -TaskPath '\' -ErrorAction SilentlyContinue |
+    Where-Object {
+        $ActionText = [string]::Join(' ', @($_.Actions | ForEach-Object { [string]$_.Execute; [string]$_.Arguments }))
+        $ActionText -match $GatewayWatchPattern
+    } |
+    Select-Object -First 1
+if ($null -ne $ExistingGatewayTask) { $GatewayTask = [string]$ExistingGatewayTask.TaskName }
+$ControlPython = if (-not [string]::IsNullOrWhiteSpace($env:AIOS_PYTHON)) { $env:AIOS_PYTHON } else { Join-Path $ControlRoot '.venv\Scripts\python.exe' }
+$ControlConfig = [Environment]::GetEnvironmentVariable('AIOS_CONTROL_PLANE_CONFIG')
+if ([string]::IsNullOrWhiteSpace($ControlConfig)) { throw 'AIOS_CONTROL_PLANE_CONFIG must identify the Control Plane configuration file.' }
+if (-not [IO.Path]::IsPathRooted($ControlConfig)) { $ControlConfig = Join-Path $ControlRoot $ControlConfig }
+$ControlConfig = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($ControlConfig))
+$ControlConfigPy = Join-Path $ControlRoot 'src\domains\control_plane\config.py'
+$ControlAlertPy = Join-Path $ControlRoot 'src\domains\control_plane\alert_policy.py'
 $Schtasks = Join-Path $env:SystemRoot 'System32\schtasks.exe'
 
 $tx = Join-Path ([IO.Path]::GetTempPath()) ('ratio-luna-gateway-' + [guid]::NewGuid().ToString('N'))
@@ -165,7 +195,7 @@ function TaskEnd([string]$Name){Native @('/End','/TN',('\'+$Name)) 30 @(0,1,128)
 function TaskEnable([string]$Name,[bool]$Enable){if($Enable){Native @('/Change','/TN',('\'+$Name),'/ENABLE') 30}else{Native @('/Change','/TN',('\'+$Name),'/DISABLE') 30}}
 function PortPids([int]$Port){return @((Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue|ForEach-Object{[int]$_.OwningProcess}|Sort-Object -Unique))}
 function CmdLine([int]$ProcessId){$p=Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction SilentlyContinue|Select-Object -First 1;if($null -eq $p){return ''};return [string]$p.CommandLine}
-function GatewayOwner([int]$Port,[int]$ProcessId){$c=CmdLine $ProcessId;$root=[regex]::Escape($GatewayRoot);if([string]::IsNullOrWhiteSpace($c)-or$c-notmatch "(?i)$root"){return $false};if($Port-eq4100){return [bool]($c-match '(?i)responses-proxy\.py')};if($Port-eq4101){return [bool]($c-match '(?i)run_server\.py')};if($Port-eq4102){return [bool]($c-match '(?i)chat-completions-proxy\.py')};return $false}
+function GatewayOwner([int]$Port,[int]$ProcessId){$c=CmdLine $ProcessId;$root=[regex]::Escape($GatewayRoot);if([string]::IsNullOrWhiteSpace($c)-or$c-notmatch "(?i)$root"){return $false};return [bool]($c-match '(?i)llm_gateway\.core_server|agent-gateway\.py|responses-proxy\.py|run_server\.py|chat-completions-proxy\.py')}
 function ControlOwner([int]$ProcessId){
     $p=Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction SilentlyContinue|Select-Object -First 1
     if($null -eq $p -or $p.Name -notmatch '(?i)^python(\.exe)?$' -or [string]$p.CommandLine -notmatch '(?i)\s-m\s+control_plane(\s|$)'){return $false}
@@ -205,8 +235,8 @@ function GatewayTreeRoot([int]$ProcessId){
     }
     return $ProcessId
 }
-function StopGatewayProcesses{AssertPortSafe 4100 'gateway';AssertPortSafe 4101 'gateway';AssertPortSafe 4102 'gateway';$roots=@((PortPids 4100)+(PortPids 4101)+(PortPids 4102)|ForEach-Object{GatewayTreeRoot $_}|Sort-Object -Unique);foreach($id in $roots){StopTree $id};$end=[DateTime]::UtcNow.AddSeconds(30);while([DateTime]::UtcNow-lt$end){if((@(PortPids 4100).Count-eq0)-and(@(PortPids 4101).Count-eq0)-and(@(PortPids 4102).Count-eq0)){return};Start-Sleep -Milliseconds 300};Fail 'gateway ports did not clear'}
-function StopControlProcess{AssertPortSafe 18083 'control';foreach($id in @(PortPids 18083)){StopTree $id};$end=[DateTime]::UtcNow.AddSeconds(30);while([DateTime]::UtcNow-lt$end){if(@(PortPids 18083).Count-eq0){return};Start-Sleep -Milliseconds 300};Fail 'control-plane port did not clear'}
+function StopGatewayProcesses{foreach($port in $GatewayPorts){AssertPortSafe $port 'gateway'};$roots=@($GatewayPorts|ForEach-Object{PortPids $_}|ForEach-Object{GatewayTreeRoot $_}|Sort-Object -Unique);foreach($id in $roots){StopTree $id};$end=[DateTime]::UtcNow.AddSeconds(30);while([DateTime]::UtcNow-lt$end){$busy=$false;foreach($port in $GatewayPorts){if(@(PortPids $port).Count-gt0){$busy=$true}};if(-not$busy){return};Start-Sleep -Milliseconds 300};Fail 'gateway ports did not clear'}
+function StopControlProcess{AssertPortSafe $ControlPort 'control';foreach($id in @(PortPids $ControlPort)){StopTree $id};$end=[DateTime]::UtcNow.AddSeconds(30);while([DateTime]::UtcNow-lt$end){if(@(PortPids $ControlPort).Count-eq0){return};Start-Sleep -Milliseconds 300};Fail 'control-plane port did not clear'}
 function Status([string]$Url){try{return [int](Invoke-WebRequest -Uri $Url -TimeoutSec 3 -SkipHttpErrorCheck).StatusCode}catch{return 0}}
 function ResolveCodexExe{
     if (
@@ -244,16 +274,16 @@ function OfficialModelSlugs{
 }
 function GatewayHealthy {
     return (
-        (Status 'http://127.0.0.1:4100/health/liveliness') -eq 200 -and
-        (Status 'http://127.0.0.1:4101/health/liveliness') -eq 200 -and
-        (Status 'http://127.0.0.1:4102/health/liveliness') -eq 200
+        (Status "$CoreServiceUrl/health/liveliness") -eq 200 -and
+        (Status "$AgentServiceUrl/health/liveliness") -eq 200 -and
+        (Status "$ResponsesServiceUrl/health/liveliness") -eq 200
     )
 }
 function GatewayModelsMatch{
     if (-not (GatewayHealthy)) { return $false }
     try{
         $expected=@(OfficialModelSlugs|Sort-Object -Unique)
-        $m=Invoke-RestMethod -Uri "$LiteLlmBaseUrl/models" -TimeoutSec 5
+        $m=Invoke-RestMethod -Uri "$AgentBaseUrl/models" -TimeoutSec 5
         $actual=@($m.data|ForEach-Object{[string]$_.id}|Sort-Object -Unique)
         return (
             $expected.Count -eq $actual.Count -and
@@ -263,7 +293,7 @@ function GatewayModelsMatch{
 }
 function GatewayReady { return ((GatewayHealthy) -and (GatewayModelsMatch)) }
 function WaitGateway([int]$Limit=180){$end=[DateTime]::UtcNow.AddSeconds((Remaining $Limit));while([DateTime]::UtcNow-lt$end){if(GatewayReady){return};Start-Sleep -Seconds 2};Fail 'gateway readiness timeout'}
-function WaitControl([int]$Limit=120){$end=[DateTime]::UtcNow.AddSeconds((Remaining $Limit));while([DateTime]::UtcNow-lt$end){if((Status 'http://127.0.0.1:18083/live')-eq200){return};Start-Sleep -Seconds 2};Fail 'control-plane liveness timeout'}
+function WaitControl([int]$Limit=120){$end=[DateTime]::UtcNow.AddSeconds((Remaining $Limit));while([DateTime]::UtcNow-lt$end){if((Status "$ControlBaseUrl/live")-eq200){return};Start-Sleep -Seconds 2};Fail 'control-plane liveness timeout'}
 function SetTopLevelCodexRouting{
     $path=$CodexConfig;$text=ReadText $path;$nl=[Environment]::NewLine;$final=$text.EndsWith($nl);$a=[regex]::Split($text,'\r?\n');if($final -and $a.Count -gt 1 -and $a[$a.Count-1] -eq ''){$a=$a[0..($a.Count-2)]};$lines=[System.Collections.Generic.List[string]]::new();foreach($line in $a){$null=$lines.Add($line)}
     $first=$lines.Count;for($i=0;$i-lt$lines.Count;$i++){if($lines[$i]-match '^\s*\[[^\]]+\]\s*$'){$first=$i;break}}
@@ -284,7 +314,7 @@ function SetSection([string]$Text,[string]$Section,[string[]]$Keys,[hashtable]$V
 function UpdatePersistentConfig{
     NormalizeControlConfigModels $ControlConfigPy
     $codexCli=(ResolveCodexExe)-replace '\\','/'
-    $before=ReadText $ControlConfig;$t=SetSection $before 'model' @('diagnosis_model','execution_model','gateway_base_url','codex_cli') @{diagnosis_model=$OfficialModel;execution_model=$OfficialModel;gateway_base_url=$LiteLlmBaseUrl;codex_cli=$codexCli};$t=SetSection $t 'agent' @('model','gateway_base_url') @{model=$OfficialModel;gateway_base_url=$LiteLlmBaseUrl};$null=SetText $ControlConfig $before $t
+    $before=ReadText $ControlConfig;$t=SetSection $before 'model' @('diagnosis_model','execution_model','gateway_base_url','codex_cli') @{diagnosis_model=$OfficialModel;execution_model=$OfficialModel;gateway_base_url=$AgentBaseUrl;codex_cli=$codexCli};$t=SetSection $t 'agent' @('model','gateway_base_url') @{model=$OfficialModel;gateway_base_url=$AgentBaseUrl};$null=SetText $ControlConfig $before $t
     SetTopLevelCodexRouting
 }
 function GatewayProbe{$body=@{model=$OfficialModel;input=@(@{role='user';content=@(@{type='input_text';text='Reply exactly RATIO_GATEWAY_OK.'})});max_output_tokens=32}|ConvertTo-Json -Depth 8 -Compress;$r=Invoke-WebRequest -Uri "$CodexBaseUrl/responses" -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 120 -SkipHttpErrorCheck;if([int]$r.StatusCode-lt200-or[int]$r.StatusCode-ge300){Fail "gateway Responses probe failed: status=$($r.StatusCode)"}}
@@ -294,7 +324,7 @@ function CodexProbe{
     try{if(-not$p.Start()){Fail 'codex probe did not start'};$p.BeginOutputReadLine();$p.BeginErrorReadLine();if(-not$p.WaitForExit(([int](Remaining 150)*1000))){try{$p.Kill($true)}catch{};Fail 'codex probe timeout'};$ec=$p.ExitCode}finally{$p.Dispose()};if($ec-ne0){Fail "codex probe failed: exit=$ec"}
 }
 function PythonConfigProbe{
-    $code="from control_plane.config import ControlPlaneConfig; from control_plane.codex_provider import CodexProvider; c=ControlPlaneConfig.load(); assert c.diagnosis_model=='$OfficialModel' and c.execution_model=='$OfficialModel' and c.gateway_base_url=='$LiteLlmBaseUrl' and c.codex_cli.is_file() and hasattr(CodexProvider,'invoke'); print('RATIO_CONTROL_OK')"
+    $code="from control_plane.config import ControlPlaneConfig; from control_plane.codex_provider import CodexProvider; c=ControlPlaneConfig.load(); assert c.diagnosis_model=='$OfficialModel' and c.execution_model=='$OfficialModel' and c.gateway_base_url=='$AgentBaseUrl' and c.codex_cli.is_file() and hasattr(CodexProvider,'invoke'); print('RATIO_CONTROL_OK')"
     $si=[Diagnostics.ProcessStartInfo]::new();$si.FileName=$ControlPython;$si.WorkingDirectory=$ControlRoot;$si.UseShellExecute=$false;$si.CreateNoWindow=$true;$si.RedirectStandardOutput=$true;$si.RedirectStandardError=$true;$si.Environment['CONTROL_PLANE_API_KEY']='ratio-luna-probe';foreach($a in @('-c',$code)){$null=$si.ArgumentList.Add($a)};$p=[Diagnostics.Process]::new();$p.StartInfo=$si
     try{if(-not$p.Start()){Fail 'python config probe did not start'};$p.BeginOutputReadLine();$p.BeginErrorReadLine();if(-not$p.WaitForExit(([int](Remaining 30)*1000))){try{$p.Kill($true)}catch{};Fail 'python config probe timeout'};$ec=$p.ExitCode}finally{$p.Dispose()};if($ec-ne0){Fail "control-plane config probe failed: exit=$ec"}
 }
@@ -316,11 +346,11 @@ try{
     if (-not (
         $configSource.Contains('diagnosis_model: str = "gpt-6-luna"') -and
         $configSource.Contains('execution_model: str = "gpt-6-luna"')
-    )) { AssertCleanTarget $ControlRoot 'src/control_plane/config.py' }
-    AssertPortSafe 4100 'gateway';AssertPortSafe 4101 'gateway';AssertPortSafe 4102 'gateway';AssertPortSafe 18083 'control';$gatewayWasReady=GatewayHealthy;$gatewayModelsMatched=if($gatewayWasReady){GatewayModelsMatch}else{$false};$controlWasLive=(Status 'http://127.0.0.1:18083/live')-eq200
-    Snapshot $CodexConfig 'codex.config.toml';Snapshot $ControlConfigPy 'control.config.py';Snapshot $ControlAlertPy 'control.alert_policy.py';Snapshot $ControlConfig 'control_plane.toml';Snapshot (Join-Path $GatewayRoot 'litellm\config.runtime.yaml') 'gateway.config.runtime.yaml';Snapshot (Join-Path $CodexHome 'models.filtered.json') 'codex.models.filtered.json';Snapshot (Join-Path $GatewayRoot 'litellm\.litellm-core.pid') 'gateway.core.pid';Snapshot (Join-Path $GatewayRoot 'litellm\.responses-ingress.pid') 'gateway.responses.pid';Snapshot (Join-Path $GatewayRoot 'litellm\.chat-completions-ingress.pid') 'gateway.chat.pid'
+    )) { AssertCleanTarget $ControlRoot 'src/domains/control_plane/config.py' }
+    foreach($port in $GatewayPorts){AssertPortSafe $port 'gateway'};AssertPortSafe $ControlPort 'control';$gatewayWasReady=GatewayHealthy;$gatewayModelsMatched=if($gatewayWasReady){GatewayModelsMatch}else{$false};$controlWasLive=(Status "$ControlBaseUrl/live")-eq200
+    Snapshot $CodexConfig 'codex.config.toml';Snapshot $ControlConfigPy 'control.config.py';Snapshot $ControlAlertPy 'control.alert_policy.py';Snapshot $ControlConfig 'control_plane.toml';Snapshot (Join-Path $GatewayRoot 'core\models.yaml') 'gateway.models.yaml';Snapshot (Join-Path $GatewayRoot 'core\.run\core.pid') 'gateway.core.pid';Snapshot (Join-Path $GatewayRoot 'core\.run\agent.pid') 'gateway.agent.pid';Snapshot (Join-Path $GatewayRoot 'core\.run\responses.pid') 'gateway.responses.pid'
     $stage='config';UpdatePersistentConfig
-    $stage='gateway';if(-not $gatewayWasReady -or -not $gatewayModelsMatched){$gatewayTouched=$true;MarkChanged (Join-Path $GatewayRoot 'litellm\config.runtime.yaml');TaskEnd $GatewayTask;StopGatewayProcesses;TaskEnable $GatewayTask $true;TaskRun $GatewayTask { GatewayHealthy };WaitGateway 180}elseif(-not $gatewayTaskBefore.Enabled){$gatewayTouched=$true;TaskEnable $GatewayTask $true};GatewayProbe;Say 'LiteLLM protocol ingress and routing validation passed'
-    $stage='codex';CodexProbe;Say 'Codex 经 4100 网关验证通过'
-    $stage='control';PythonConfigProbe;if(-not$controlWasLive-or$changed.Contains($ControlConfigPy)-or$changed.Contains($ControlAlertPy)-or$changed.Contains($ControlConfig)){$controlTouched=$true;TaskEnd $ControlTask;StopControlProcess;TaskEnable $ControlTask $true;TaskRun $ControlTask { (Status 'http://127.0.0.1:18083/live') -eq 200 };WaitControl 120};Say 'control-plane 配置与 liveness 验证通过';Say '完成：网关任务已启用，模型统一为 gpt-6-luna';$parent=[IO.Path]::GetFullPath([IO.Path]::GetTempPath());$full=[IO.Path]::GetFullPath($tx);if($full.StartsWith($parent,[StringComparison]::OrdinalIgnoreCase)-and(Split-Path $full -Leaf).StartsWith('ratio-luna-gateway-')){Remove-Item -LiteralPath $full -Recurse -Force};exit 0
+    $stage='gateway';if(-not $gatewayWasReady -or -not $gatewayModelsMatched){$gatewayTouched=$true;TaskEnd $GatewayTask;StopGatewayProcesses;TaskEnable $GatewayTask $true;TaskRun $GatewayTask { GatewayHealthy };WaitGateway 180}elseif(-not $gatewayTaskBefore.Enabled){$gatewayTouched=$true;TaskEnable $GatewayTask $true};GatewayProbe;Say 'LLM Gateway Agent entry and routing validation passed'
+    $stage='codex';CodexProbe;Say 'Codex 经 4101 Agent 入口验证通过'
+    $stage='control';PythonConfigProbe;if(-not$controlWasLive-or$changed.Contains($ControlConfigPy)-or$changed.Contains($ControlAlertPy)-or$changed.Contains($ControlConfig)){$controlTouched=$true;TaskEnd $ControlTask;StopControlProcess;TaskEnable $ControlTask $true;TaskRun $ControlTask { (Status "$ControlBaseUrl/live") -eq 200 };WaitControl 120};Say 'control-plane 配置与 liveness 验证通过';Say '完成：网关任务已启用，模型统一为 gpt-6-luna';$parent=[IO.Path]::GetFullPath([IO.Path]::GetTempPath());$full=[IO.Path]::GetFullPath($tx);if($full.StartsWith($parent,[StringComparison]::OrdinalIgnoreCase)-and(Split-Path $full -Leaf).StartsWith('ratio-luna-gateway-')){Remove-Item -LiteralPath $full -Recurse -Force};exit 0
 }catch{$detail=([string]$_.Exception.Message)-replace '[\r\n]+',' ';Say "失败，自动回滚（阶段=$stage，错误类型=$($_.Exception.GetType().Name)，原因=$detail）";$ok=Rollback;if($ok){Say '自动回滚完成，已恢复执行前文件与任务状态'}else{Write-Error "自动回滚未完全确认（$($rollbackErrors -join ', ')）；保留事务目录：$tx"};exit $(if($ok){1}else{2})}

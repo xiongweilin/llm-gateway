@@ -1,0 +1,10 @@
+{
+  "listen_host": "127.0.0.1",
+  "ports": {
+    "core": 4100,
+    "agent": 4101,
+    "responses": 4102
+  },
+  "models_file": "core/models.yaml",
+  "control_plane_backend": "https://chatgpt.com/backend-api/codex"
+}

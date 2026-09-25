@@ -1,0 +1,28 @@
+[project]
+name = "llm-gateway"
+version = "0.2.0"
+description = "Self-owned model routing core and agent protocol gateway."
+requires-python = ">=3.11"
+dependencies = [
+    "aiohttp>=3.11,<4",
+    "backports.zstd>=1.0,<2",
+    "PyYAML>=6,<7",
+    "zstandard>=0.25,<1",
+]
+
+[project.scripts]
+llm-gateway-core = "llm_gateway.core_server:main"
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.27,<1",
+    "pytest==9.1.1",
+]

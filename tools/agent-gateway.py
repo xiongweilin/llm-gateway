@@ -1,0 +1,184 @@
+"""Unified loopback entry for agent clients.
+
+Port assignment is supplied by the gateway configuration: chat traffic and the
+model catalog go to the core; Responses traffic goes to the Responses service.
+Request and response bodies are streamed or forwarded without being logged.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import logging
+from collections.abc import Mapping
+from pathlib import Path
+import sys
+
+import aiohttp
+from aiohttp import web
+
+CORE_SRC = Path(__file__).resolve().parents[1] / "core" / "src"
+if str(CORE_SRC) not in sys.path:
+    sys.path.insert(0, str(CORE_SRC))
+
+from llm_gateway.config import load_model_routes, protocol_models
+
+
+log = logging.getLogger("agent-gateway")
+CORE_URL_KEY = web.AppKey("core_url", str)
+RESPONSES_URL_KEY = web.AppKey("responses_url", str)
+CHAT_MODELS_KEY = web.AppKey("chat_models", set[str])
+SESSION_KEY = web.AppKey("session", aiohttp.ClientSession)
+RESPONSES_PATH = "/v1/responses"
+CHAT_PATH = "/v1/chat/completions"
+MODELS_PATH = "/v1/models"
+HEALTH_PATH = "/health/liveliness"
+CONTROL_PLANE_PREFIX = "/v1/alpha"
+HOP_BY_HOP_HEADERS = {
+    "connection",
+    "content-length",
+    "content-encoding",
+    "host",
+    "transfer-encoding",
+}
+
+
+def is_control_plane_path(path: str) -> bool:
+    return path == CONTROL_PLANE_PREFIX or path.startswith(f"{CONTROL_PLANE_PREFIX}/")
+
+
+def select_backend(path: str, core_url: str, responses_url: str) -> str | None:
+    if path == CHAT_PATH or path == MODELS_PATH or path == HEALTH_PATH:
+        return core_url
+    if path == RESPONSES_PATH or is_control_plane_path(path):
+        return responses_url
+    return None
+
+
+def build_url(backend: str, path: str, query: str = "") -> str:
+    url = f"{backend.rstrip('/')}{path}"
+    return f"{url}?{query}" if query else url
+
+
+def forward_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    result = {
+        key: value
+        for key, value in headers.items()
+        if key.lower() not in HOP_BY_HOP_HEADERS
+    }
+    result["Accept-Encoding"] = "identity"
+    return result
+
+
+async def handle(request: web.Request):
+    core_url = request.app[CORE_URL_KEY]
+    responses_url = request.app[RESPONSES_URL_KEY]
+    backend = select_backend(request.path, core_url, responses_url)
+    if backend is None or request.method not in {"GET", "POST"}:
+        return web.json_response(
+            {"error": {"type": "not_found", "message": "path is not served by the agent entry"}},
+            status=404,
+        )
+
+    if request.method == "POST" and request.path == CHAT_PATH:
+        try:
+            body = await request.read()
+            # aiohttp decodes supported request encodings before this handler.
+            value = json.loads(body)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return web.json_response(
+                {"error": {"type": "invalid_request_error", "message": "request body must be JSON"}},
+                status=400,
+            )
+        model = value.get("model") if isinstance(value, dict) else None
+        chat_models = request.app[CHAT_MODELS_KEY]
+        if chat_models and model not in chat_models:
+            return web.json_response(
+                {"error": {"type": "invalid_request_error", "message": "model is unavailable for chat completions"}},
+                status=404,
+            )
+    else:
+        body = await request.read() if request.can_read_body else b""
+
+    session = request.app[SESSION_KEY]
+    try:
+        async with session.request(
+            request.method,
+            build_url(backend, request.path, request.query_string),
+            data=body,
+            headers=forward_headers(request.headers),
+            compress=False,
+            timeout=aiohttp.ClientTimeout(total=4200),
+        ) as upstream:
+            response_headers = {
+                key: value
+                for key, value in upstream.headers.items()
+                if key.lower() not in HOP_BY_HOP_HEADERS
+            }
+            if "text/event-stream" not in upstream.headers.get("Content-Type", "").lower():
+                return web.Response(
+                    status=upstream.status,
+                    body=await upstream.read(),
+                    headers=response_headers,
+                )
+            response = web.StreamResponse(status=upstream.status, headers=response_headers)
+            await response.prepare(request)
+            async for chunk in upstream.content.iter_any():
+                if chunk:
+                    await response.write(chunk)
+            await response.write_eof()
+            return response
+    except asyncio.CancelledError:
+        raise
+    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        log.warning("gateway target unavailable: %s", type(exc).__name__)
+        return web.json_response(
+            {"error": {"type": "upstream_error", "message": "gateway target is unavailable"}},
+            status=502,
+        )
+
+
+async def _start_session(app: web.Application) -> None:
+    app[SESSION_KEY] = aiohttp.ClientSession(
+        connector=aiohttp.TCPConnector(limit=64),
+        trust_env=True,
+    )
+
+
+async def _close_session(app: web.Application) -> None:
+    await app[SESSION_KEY].close()
+
+
+def create_app(core_url: str, responses_url: str, chat_models: set[str] | None = None):
+    app = web.Application(client_max_size=128 * 1024 * 1024)
+    app[CORE_URL_KEY] = core_url
+    app[RESPONSES_URL_KEY] = responses_url
+    app[CHAT_MODELS_KEY] = chat_models or set()
+    app.router.add_route("*", "/{tail:.*}", handle)
+    app.on_startup.append(_start_session)
+    app.on_cleanup.append(_close_session)
+    return app
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run the unified agent API entry.")
+    parser.add_argument("--host", required=True)
+    parser.add_argument("--port", required=True, type=int)
+    parser.add_argument("--core-url", required=True)
+    parser.add_argument("--responses-url", required=True)
+    parser.add_argument("--models-config", required=True)
+    args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+    routes = load_model_routes(args.models_config)
+    _, chat_models = protocol_models(routes)
+    web.run_app(
+        create_app(args.core_url, args.responses_url, chat_models),
+        host=args.host,
+        port=args.port,
+        access_log=None,
+    )
+
+
+if __name__ == "__main__":
+    main()

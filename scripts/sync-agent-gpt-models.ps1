@@ -5,7 +5,7 @@
 #   并追加受控的 supplemental models；
 # - 清理其他模型，保持固定顺序并去重；
 # - 只在生成并校验完整内容后替换目标文件，失败不会破坏现有配置；
-# - 本脚本不生成或决定 LiteLLM runtime configuration。
+# - 本脚本只维护客户端模型目录，不生成或决定 gateway route configuration。
 
 param(
     [string]$CatalogPath = (Join-Path $env:USERPROFILE ".codex\models_cache.json"),
@@ -34,7 +34,7 @@ $OfficialModelContextWindowOverrides = @{
 $SupplementalModelDefinitions = [ordered]@{
     "opencode-go/deepseek-flash" = [ordered]@{
         DisplayName = "DeepSeek Flash (OpenCode Go)"
-        Description = "OpenCode Go DeepSeek Flash model routed through the local LiteLLM gateway."
+        Description = "OpenCode Go DeepSeek Flash model routed through the local LLM Gateway."
         Priority = 5
         ContextWindow = 1048576
         AutoCompactTokenLimit = 900000
@@ -43,7 +43,7 @@ $SupplementalModelDefinitions = [ordered]@{
     # --- 以下模型已停用（2026-09-23），恢复时取消注释 ---
     # "opencode-go/muse-spark-1.3-contributor" = [ordered]@{
     #     DisplayName = "Muse Spark 1.3 Contributor (OpenCode Go)"
-    #     Description = "OpenCode Go contributor model routed through the local LiteLLM gateway."
+    #     Description = "OpenCode Go contributor model routed through the local LLM Gateway."
     #     Priority = 4
     #     ContextWindow = 1048576
     #     AutoCompactTokenLimit = 900000
@@ -51,13 +51,13 @@ $SupplementalModelDefinitions = [ordered]@{
     # }
     # "opencode-go/omen-alpha" = [ordered]@{
     #     DisplayName = "Omen Alpha (OpenCode Go)"
-    #     Description = "OpenCode Go Omen Alpha model routed through the local LiteLLM gateway."
+    #     Description = "OpenCode Go Omen Alpha model routed through the local LLM Gateway."
     #     Priority = 5
     #     ContextWindow = 500000
     # }
     # "opencode-go/union-alpha-free" = [ordered]@{
     #     DisplayName = "Union Alpha Free (OpenCode Go)"
-    #     Description = "OpenCode Go Union Alpha Free model routed through the local LiteLLM gateway."
+    #     Description = "OpenCode Go Union Alpha Free model routed through the local LLM Gateway."
     #     Priority = 6
     #     # Upstream context limit has not been published in the supplied model entry.
     #     # Keep the local catalog conservative until a real protocol probe confirms it.

@@ -20,7 +20,7 @@ jobs:
     timeout-minutes: 20
     defaults:
       run:
-        working-directory: litellm
+        working-directory: core
     steps:
       - uses: actions/checkout@v4
       - name: Validate repository basics

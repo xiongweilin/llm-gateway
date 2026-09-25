@@ -10,14 +10,33 @@ Set-StrictMode -Version Latest
 
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $StopScript = Join-Path $Root "scripts\stop-agent-gateway.ps1"
+$GatewayWatchScript = Join-Path $Root "scripts\watch-agent-gateway.ps1"
+$GatewayWatchPattern = [regex]::Escape($GatewayWatchScript)
+$ManagedGatewayTask = Get-ScheduledTask -TaskPath '\' -ErrorAction SilentlyContinue |
+    Where-Object {
+        $ActionText = [string]::Join(' ', @($_.Actions | ForEach-Object { [string]$_.Execute; [string]$_.Arguments }))
+        $ActionText -match $GatewayWatchPattern
+    } |
+    Select-Object -First 1
+$GatewayTaskName = if ($null -ne $ManagedGatewayTask) {
+    [string]$ManagedGatewayTask.TaskName
+} else {
+    "LLM-Gateway-Agent-Entry"
+}
+$GatewayConfigPath = Join-Path $Root "config\gateway.json"
+$GatewayConfig = Get-Content -LiteralPath $GatewayConfigPath -Raw | ConvertFrom-Json
+$GatewayPorts = @(
+    [int]$GatewayConfig.ports.core,
+    [int]$GatewayConfig.ports.agent,
+    [int]$GatewayConfig.ports.responses
+)
 $CodexConfig = Join-Path $env:USERPROFILE ".codex\config.toml"
-$GatewayTaskName = "LiteLLM-Agent-Gateway"
 $BackupPath = $null
 
 function Get-GatewayListeners {
     @(
         Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
-            Where-Object { $_.LocalPort -in 4100, 4101, 4102 }
+            Where-Object { $_.LocalPort -in $GatewayPorts }
     )
 }
 
@@ -151,7 +170,7 @@ try {
         throw "网关计划任务未处于 Disabled: $GatewayTaskName state=$($finalTask.State)"
     }
 
-    Write-Host "完成：LiteLLM/zstd 网关已停止，Codex 配置已切换为官方路由。"
+    Write-Host "完成：LLM Gateway 已停止，Codex 配置已切换为官方路由。"
     Write-Host "请完全退出并重新打开 Codex Desktop/CLI；不要在当前会话中强杀 codex.exe。"
     exit 0
 }

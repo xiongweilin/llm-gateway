@@ -1,4 +1,4 @@
-# Python 环境与缓存
+# Python environments and caches
 .venv/
 __pycache__/
 *.pyc
@@ -6,6 +6,7 @@ __pycache__/
 .coverage
 htmlcov/
 
-# 运行时日志与 pid（litellm/.gitignore 另有细化规则）
+# Runtime artifacts
+**/.run/
 *.log
 *.pid

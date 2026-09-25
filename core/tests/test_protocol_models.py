@@ -8,16 +8,18 @@ from tools.protocol_models import load_protocol_models
 
 
 def test_load_protocol_models_reads_mode_sets(tmp_path: Path) -> None:
-    config = tmp_path / "runtime.yaml"
+    config = tmp_path / "models.yaml"
     config.write_text(
         """
-model_list:
-  - model_name: responses-model-a
-    model_info:
-      mode: responses
-  - model_name: chat-model-a
-    model_info:
-      mode: chat
+models:
+  - id: responses-model-a
+    mode: responses
+    upstream_model: upstream-responses-a
+    api_base: https://provider.example/v1
+  - id: chat-model-a
+    mode: chat
+    upstream_model: upstream-chat-a
+    api_base: https://provider.example/v1
 """.lstrip(),
         encoding="utf-8",
     )
@@ -29,19 +31,21 @@ model_list:
 
 
 def test_load_protocol_models_rejects_overlap(tmp_path: Path) -> None:
-    config = tmp_path / "runtime.yaml"
+    config = tmp_path / "models.yaml"
     config.write_text(
         """
-model_list:
-  - model_name: shared
-    model_info:
-      mode: responses
-  - model_name: shared
-    model_info:
-      mode: chat
+models:
+  - id: shared
+    mode: responses
+    upstream_model: upstream-a
+    api_base: https://provider.example/v1
+  - id: shared
+    mode: chat
+    upstream_model: upstream-a
+    api_base: https://provider.example/v1
 """.lstrip(),
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="both protocol sets"):
+    with pytest.raises(ValueError, match="duplicate model route"):
         load_protocol_models(str(config))

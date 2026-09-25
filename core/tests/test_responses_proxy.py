@@ -343,7 +343,7 @@ def test_deepseek_compaction_checkpoint_rewrites_history_and_reuses_state() -> N
                 raw,
                 "codex-test-session",
                 None,
-                "http://127.0.0.1:4101",
+                "http://127.0.0.1:4100",
                 {},
             )
         )
@@ -360,7 +360,7 @@ def test_deepseek_compaction_checkpoint_rewrites_history_and_reuses_state() -> N
                 raw,
                 "codex-test-session",
                 None,
-                "http://127.0.0.1:4101",
+                "http://127.0.0.1:4100",
                 {},
             )
         )
@@ -1111,8 +1111,8 @@ def test_truncate_input_never_leaves_orphaned_tool_outputs() -> None:
     assert [o["call_id"] for o in outputs] == ["call_B"]
 
 
-def test_control_plane_paths_bypass_litellm_without_changing_model_routes() -> None:
-    model_backend = "http://127.0.0.1:4101"
+def test_control_plane_paths_route_separately_from_model_requests() -> None:
+    model_backend = "http://127.0.0.1:4100"
     control_plane_backend = "https://chatgpt.example/backend-api/codex"
 
     assert proxy.is_control_plane_path("/v1/alpha/search")
@@ -1154,13 +1154,13 @@ def test_control_plane_paths_bypass_litellm_without_changing_model_routes() -> N
     )
     assert (
         proxy.build_upstream_url(model_backend, "/v1/responses")
-        == "http://127.0.0.1:4101/v1/responses"
+        == "http://127.0.0.1:4100/v1/responses"
     )
 
 
 def test_responses_proxy_enforces_protocol_boundary_and_filters_models() -> None:
     assert proxy.is_allowed_path("/v1/responses", "POST")
-    assert proxy.is_allowed_path("/v1/chat/completions", "POST")
+    assert not proxy.is_allowed_path("/v1/chat/completions", "POST")
     assert proxy.is_allowed_path("/v1/models", "GET")
     assert proxy.is_allowed_path("/health/liveliness", "GET")
     assert proxy.is_allowed_path("/v1/alpha/search", "GET")

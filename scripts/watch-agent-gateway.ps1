@@ -1,4 +1,4 @@
-# Monitor the unified ingress, routing core, and Chat forwarding hop.
+# Monitor the model core, unified Agent entry, and Responses protocol service.
 # The filename is retained for the existing scheduled task.
 
 #Requires -Version 7.0
@@ -13,6 +13,14 @@ Set-StrictMode -Version Latest
 
 $Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $StartScript = Join-Path $Root 'scripts\start-agent-gateway.ps1'
+$GatewayConfigPath = Join-Path $Root 'config\gateway.json'
+$GatewayConfig = Get-Content -LiteralPath $GatewayConfigPath -Raw | ConvertFrom-Json
+$ListenHost = [string]$GatewayConfig.listen_host
+$ServicePorts = @(
+    [int]$GatewayConfig.ports.core,
+    [int]$GatewayConfig.ports.agent,
+    [int]$GatewayConfig.ports.responses
+)
 $PwshExe = Join-Path $PSHOME 'pwsh.exe'
 $LogRoot = Join-Path ([IO.Path]::GetTempPath()) 'llm-gateway-watchdog'
 $LogPath = Join-Path $LogRoot 'watchdog.log'
@@ -41,11 +49,8 @@ function Write-WatchdogLog([string]$Message) {
 }
 
 function Test-GatewayHealthy {
-    foreach ($uri in @(
-        'http://127.0.0.1:4100/health/liveliness',
-        'http://127.0.0.1:4101/health/liveliness',
-        'http://127.0.0.1:4102/health/liveliness'
-    )) {
+    foreach ($port in $ServicePorts) {
+        $uri = "http://${ListenHost}:$port/health/liveliness"
         try {
             $response = Invoke-WebRequest -Uri $uri -TimeoutSec 3 -SkipHttpErrorCheck
             if ([int]$response.StatusCode -ne 200) { return $false }
@@ -68,7 +73,7 @@ function Invoke-GatewayStart {
                 '-NoProfile',
                 '-NonInteractive',
                 '-ExecutionPolicy', 'Bypass',
-                '-File', $StartScript
+                '-File', "`"$StartScript`""
             ) `
             -RedirectStandardOutput $stdout `
             -RedirectStandardError $stderr `

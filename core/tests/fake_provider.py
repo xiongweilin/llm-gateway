@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""OpenAI 兼容的 fake provider，用于 LiteLLM 网关 conformance 测试。
+"""OpenAI-compatible fake provider for routing-core integration tests.
 
 实现：
   * POST /v1/responses        —— 非流式 JSON 与 SSE 流式（含 reasoning 与 tool_calls 输出）
