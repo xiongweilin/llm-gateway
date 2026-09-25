@@ -8,6 +8,7 @@ import os
 from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlparse
+from uuid import uuid4
 
 import aiohttp
 from aiohttp import web
@@ -41,6 +42,21 @@ LEGACY_CODEX_UPSTREAM_HEADERS = {
     "session_id",
     "user-agent",
 }
+CHATGPT_RESPONSES_ALLOWED_KEYS = {
+    "model",
+    "input",
+    "instructions",
+    "stream",
+    "store",
+    "include",
+    "tools",
+    "tool_choice",
+    "reasoning",
+    "previous_response_id",
+    "truncation",
+}
+DEFAULT_CHATGPT_ORIGINATOR = "codex_cli_rs"
+DEFAULT_CHATGPT_USER_AGENT = "codex_cli_rs/0.0.0 (Unknown 0; unknown) unknown"
 
 
 def normalize_opencode_tool_schemas(data: dict[str, Any]) -> int:
@@ -130,6 +146,25 @@ def build_upstream_url(api_base: str, request_path: str, query: str = "") -> str
     return f"{url}?{query}" if query else url
 
 
+def normalize_chatgpt_responses_payload(data: dict[str, Any]) -> None:
+    data["store"] = False
+    data["stream"] = True
+    raw_include = data.get("include")
+    include = list(raw_include) if isinstance(raw_include, list) else []
+    if "reasoning.encrypted_content" not in include:
+        include.append("reasoning.encrypted_content")
+    data["include"] = include
+
+    for key in tuple(data):
+        if key not in CHATGPT_RESPONSES_ALLOWED_KEYS:
+            del data[key]
+
+
+def _setdefault_header(headers: dict[str, str], name: str, value: str) -> None:
+    if not any(key.lower() == name.lower() for key in headers):
+        headers[name] = value
+
+
 def build_upstream_headers(
     request_headers: Mapping[str, str],
     route: ModelRoute,
@@ -163,6 +198,20 @@ def build_upstream_headers(
         headers["Authorization"] = f"Bearer {chatgpt_credentials.access_token}"
         if chatgpt_credentials.account_id:
             headers["ChatGPT-Account-Id"] = chatgpt_credentials.account_id
+
+        _setdefault_header(headers, "Content-Type", "application/json")
+        _setdefault_header(headers, "Accept", "text/event-stream")
+        _setdefault_header(
+            headers,
+            "Originator",
+            env.get("CHATGPT_ORIGINATOR") or DEFAULT_CHATGPT_ORIGINATOR,
+        )
+        _setdefault_header(
+            headers,
+            "User-Agent",
+            env.get("CHATGPT_USER_AGENT") or DEFAULT_CHATGPT_USER_AGENT,
+        )
+        _setdefault_header(headers, "session_id", str(uuid4()))
     elif route.authorization == "none":
         for key in tuple(headers):
             if key.lower() == "authorization":
@@ -327,6 +376,8 @@ async def handle(request: web.Request):
         )
 
     payload["model"] = route.upstream_model
+    if route.authorization == "chatgpt" and expected_mode == "responses":
+        normalize_chatgpt_responses_payload(payload)
     if route.compatibility == "opencode-go" and expected_mode == "responses":
         normalize_opencode_custom_tools(payload)
         normalize_opencode_tool_schemas(payload)
