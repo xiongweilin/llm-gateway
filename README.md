@@ -41,11 +41,12 @@ model id, protocol mode, provider model id, API base, and authorization source.
 Credential values are never stored in the route file. `api_base_env` allows
 provider endpoints that explicitly opt in to be overridden without editing
 code. Codex GPT routes pin `https://chatgpt.com/backend-api/codex` and use
-`authorization: client`: the Codex client is configured as an explicit
-`llm-gateway` model provider with `requires_openai_auth = true`, so Codex
-itself resolves the active ChatGPT Plus OAuth credential from its supported
-credential store and the gateway preserves that authenticated request. The
-gateway does not read or duplicate Codex's private credential storage.
+`authorization: chatgpt`. This matches the historical LiteLLM `chatgpt/*`
+provider contract: Codex keeps its built-in OpenAI provider and points
+`openai_base_url` at the local Agent entry, while Core replaces the client's
+API-key-shaped Authorization value with a ChatGPT subscription OAuth token.
+The gateway token store is `~/.config/llm/chatgpt/auth.json`; refresh and
+device-code login use the same OAuth flow as the previous LiteLLM path.
 
 The Core sends requests directly to the configured provider API. The public
 model id remains stable while `upstream_model` selects the provider-side model.
