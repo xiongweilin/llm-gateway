@@ -177,3 +177,98 @@ def test_chatgpt_auth_falls_back_to_device_code_login(tmp_path) -> None:
     saved = json.loads(auth_file.read_text(encoding="utf-8"))
     assert saved["refresh_token"] == "refresh-token"
     assert saved["account_id"] == "device-account"
+
+def test_chatgpt_refresh_requires_id_token(tmp_path) -> None:
+    auth_file = tmp_path / "auth.json"
+    expired = _jwt({"exp": int(time.time()) - 60})
+    auth_file.write_text(
+        json.dumps(
+            {
+                "access_token": expired,
+                "refresh_token": "refresh-token",
+                "id_token": expired,
+                "expires_at": int(time.time()) - 60,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    async def exercise() -> None:
+        app = web.Application()
+
+        async def oauth_token(_request: web.Request) -> web.Response:
+            return web.json_response(
+                {
+                    "access_token": _jwt({"exp": int(time.time()) + 3600}),
+                    "refresh_token": "refresh-token",
+                }
+            )
+
+        app.router.add_post("/oauth/token", oauth_token)
+        async with TestClient(TestServer(app)) as auth_server:
+            async with ClientSession() as session:
+                try:
+                    await get_chatgpt_credentials(
+                        session,
+                        auth_paths=[auth_file],
+                        oauth_token_url=str(auth_server.make_url("/oauth/token")),
+                        allow_device_login=False,
+                    )
+                except RuntimeError as exc:
+                    assert "unavailable" in str(exc)
+                else:
+                    raise AssertionError("refresh without id_token unexpectedly succeeded")
+
+    asyncio.run(exercise())
+
+
+def test_device_code_cooldown_reuses_token_written_by_another_login(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(
+        json.dumps({"device_code_requested_at": time.time()}),
+        encoding="utf-8",
+    )
+    access_token = _jwt(
+        {
+            "exp": int(time.time()) + 3600,
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "shared-account"
+            },
+        }
+    )
+
+    async def exercise() -> None:
+        async def publish_token() -> None:
+            await asyncio.sleep(0.01)
+            auth_file.write_text(
+                json.dumps(
+                    {
+                        "access_token": access_token,
+                        "refresh_token": "refresh-token",
+                        "id_token": access_token,
+                        "expires_at": int(time.time()) + 3600,
+                        "account_id": "shared-account",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+        monkeypatch.setattr(
+            "llm_gateway.chatgpt_auth.DEVICE_CODE_POLL_SLEEP_SECONDS",
+            0.01,
+        )
+        async with ClientSession() as session:
+            publisher = asyncio.create_task(publish_token())
+            credentials = await get_chatgpt_credentials(
+                session,
+                auth_paths=[auth_file],
+            )
+            await publisher
+        assert credentials.access_token == access_token
+        assert credentials.account_id == "shared-account"
+
+    asyncio.run(exercise())
+
