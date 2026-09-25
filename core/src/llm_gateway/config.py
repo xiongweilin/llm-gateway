@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import yaml
 
@@ -53,6 +54,13 @@ def load_model_routes(path: str | Path) -> dict[str, ModelRoute]:
             raise ValueError(f"invalid api_key_env for {model_id}")
         if authorization not in {"client", "none", "chatgpt"}:
             raise ValueError(f"unsupported authorization source for {model_id}")
+        if (
+            authorization == "chatgpt"
+            and urlparse(api_base).hostname != "chatgpt.com"
+        ):
+            raise ValueError(
+                f"ChatGPT subscription route {model_id} must target chatgpt.com"
+            )
         if compatibility not in {None, "opencode-go"}:
             raise ValueError(f"unsupported compatibility profile for {model_id}")
 

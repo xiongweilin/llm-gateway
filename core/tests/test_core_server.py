@@ -177,6 +177,28 @@ def test_core_reports_missing_provider_credential_without_exposing_it() -> None:
     asyncio.run(exercise())
 
 
+def test_chatgpt_authorization_rejects_openai_api_host(tmp_path) -> None:
+    config = tmp_path / "models.yaml"
+    config.write_text(
+        """
+models:
+  - id: codex-model
+    mode: responses
+    upstream_model: codex-model
+    api_base: https://api.openai.com/v1
+    authorization: chatgpt
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    try:
+        load_model_routes(config)
+    except ValueError as exc:
+        assert "must target chatgpt.com" in str(exc)
+    else:
+        raise AssertionError("ChatGPT subscription route accepted api.openai.com")
+
+
 def test_model_configuration_loads_protocol_roles_and_env_overrides(tmp_path, monkeypatch) -> None:
     config = tmp_path / "models.yaml"
     config.write_text(

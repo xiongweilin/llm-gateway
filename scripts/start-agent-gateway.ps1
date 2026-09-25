@@ -23,6 +23,7 @@ if ([string]::IsNullOrWhiteSpace($ListenHost) -or @($Ports | Sort-Object -Unique
 }
 
 $CoreDir = Join-Path $Root 'core'
+$CoreSrc = Join-Path $CoreDir 'src'
 $Python = Join-Path $CoreDir '.venv\Scripts\python.exe'
 $ModelsPath = Join-Path $Root ([string]$GatewayConfig.models_file)
 $AgentEntry = Join-Path $Root 'tools\agent-gateway.py'
@@ -172,9 +173,19 @@ Stop-OwnedPort -Port $CorePort -Label 'model routing core'
 
 $Processes = @()
 try {
-    $CoreProcess = Start-Process -FilePath $Python -WorkingDirectory $CoreDir `
-        -ArgumentList @('-m', 'llm_gateway.core_server', '--config', "`"$ModelsPath`"", '--host', $ListenHost, '--port', [string]$CorePort) `
-        -RedirectStandardOutput $CoreOut -RedirectStandardError $CoreErr -WindowStyle Hidden -PassThru
+    $PreviousPythonPath = $env:PYTHONPATH
+    try {
+        $env:PYTHONPATH = if ([string]::IsNullOrWhiteSpace($PreviousPythonPath)) {
+            $CoreSrc
+        } else {
+            "$CoreSrc$([IO.Path]::PathSeparator)$PreviousPythonPath"
+        }
+        $CoreProcess = Start-Process -FilePath $Python -WorkingDirectory $CoreDir `
+            -ArgumentList @('-m', 'llm_gateway.core_server', '--config', "`"$ModelsPath`"", '--host', $ListenHost, '--port', [string]$CorePort) `
+            -RedirectStandardOutput $CoreOut -RedirectStandardError $CoreErr -WindowStyle Hidden -PassThru
+    } finally {
+        $env:PYTHONPATH = $PreviousPythonPath
+    }
     $CoreProcess.Id | Set-Content -LiteralPath $CorePid
     $Processes += $CoreProcess
     Wait-HttpReady -Uri "$CoreUrl/health/liveliness" -Label 'Core'
