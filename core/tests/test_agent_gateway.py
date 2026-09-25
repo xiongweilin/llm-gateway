@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import json
 from pathlib import Path
@@ -26,14 +27,20 @@ def test_agent_entry_routes_each_role_to_the_configured_service() -> None:
 
 
 def test_agent_entry_rejects_responses_websocket_upgrade_for_http_fallback() -> None:
-    assert gateway.is_responses_websocket_upgrade(
+    from aiohttp.test_utils import make_mocked_request
+
+    request = make_mocked_request(
         "GET",
         "/v1/responses",
-        {
+        headers={
             "Connection": "Upgrade",
             "Upgrade": "websocket",
         },
     )
+    response = asyncio.run(gateway.handle(request))
+    assert response.status == 426
+    assert response.headers["Upgrade"] == "websocket"
+
     assert not gateway.is_responses_websocket_upgrade(
         "POST",
         "/v1/responses",
