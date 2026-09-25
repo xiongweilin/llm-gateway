@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -13,7 +14,7 @@ from fake_provider import FakeProviderServer
 
 def test_production_chatgpt_routes_cannot_be_redirected_by_chatgpt_api_base(monkeypatch) -> None:
     monkeypatch.setenv("CHATGPT_API_BASE", "https://api.openai.com/v1")
-    routes = load_model_routes(ROOT / "models.yaml")
+    routes = load_model_routes(Path(__file__).parents[1] / "models.yaml")
 
     for model_id in ("gpt-6-sol", "gpt-6-luna"):
         route = routes[model_id]
