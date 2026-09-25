@@ -80,7 +80,7 @@ def _candidate_auth_files(
         return [Path(path).expanduser() for path in auth_paths]
     token_dir = Path(
         environ.get("CHATGPT_TOKEN_DIR")
-        or (Path.home() / ".config" / "litellm" / "chatgpt")
+        or (Path.home() / ".config" / "llm" / "chatgpt")
     ).expanduser()
     token_name = environ.get("CHATGPT_AUTH_FILE") or "auth.json"
     return [(token_dir / token_name).resolve(strict=False)]
@@ -356,5 +356,5 @@ async def get_chatgpt_credentials(
             )
 
     raise RuntimeError(
-        "ChatGPT subscription credential is unavailable in the LiteLLM-compatible token store"
+        "ChatGPT subscription credential is unavailable in ~/.config/llm/chatgpt/auth.json"
     )
