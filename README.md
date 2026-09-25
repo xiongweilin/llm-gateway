@@ -18,9 +18,9 @@ Agent clients
 ```
 
 - **4100 — Core:** owns route selection, outbound provider requests,
-  rate-limit retries, model catalog, and health. Provider credentials are
-  either supplied by the configured provider secret or, for Codex/ChatGPT
-  subscription routes, forwarded from the authenticated Agent client.
+  rate-limit retries, model catalog, health, and provider authentication.
+  Codex/ChatGPT subscription routes use the gateway-owned ChatGPT OAuth store;
+  other providers use their configured credential source.
 - **4101 — Unified Agent entry:** the single local endpoint for agent clients;
   dispatches Responses and Chat requests to their protocol services and exposes
   the combined model catalog.
