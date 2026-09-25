@@ -22,6 +22,7 @@ CHATGPT_OAUTH_TOKEN_URL = f"{CHATGPT_AUTH_BASE}/oauth/token"
 CHATGPT_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 TOKEN_EXPIRY_SKEW_SECONDS = 60
 DEVICE_CODE_TIMEOUT_SECONDS = 15 * 60
+DEVICE_CODE_COOLDOWN_SECONDS = 5 * 60
 DEVICE_CODE_POLL_SLEEP_SECONDS = 5
 _AUTH_LOCK = asyncio.Lock()
 
@@ -147,17 +148,17 @@ async def _refresh(
     id_token = value.get("id_token") if isinstance(value, dict) else None
     if not isinstance(access_token, str) or not access_token:
         raise RuntimeError("ChatGPT OAuth refresh returned no access token")
-    result = {
+    if not isinstance(id_token, str) or not id_token:
+        raise RuntimeError("ChatGPT OAuth refresh returned no id token")
+    return {
         "access_token": access_token,
         "refresh_token": (
             value.get("refresh_token")
             if isinstance(value.get("refresh_token"), str) and value.get("refresh_token")
             else refresh_token
         ),
+        "id_token": id_token,
     }
-    if isinstance(id_token, str) and id_token:
-        result["id_token"] = id_token
-    return result
 
 
 async def _request_device_code(
@@ -276,6 +277,52 @@ async def _exchange_code_for_tokens(
     return {key: value[key] for key in required}
 
 
+def _device_code_cooldown_remaining(auth_data: Mapping[str, Any] | None) -> float:
+    if not auth_data:
+        return 0.0
+    requested_at = auth_data.get("device_code_requested_at")
+    if not isinstance(requested_at, (int, float, str)):
+        return 0.0
+    try:
+        requested_at_value = float(requested_at)
+    except (TypeError, ValueError):
+        return 0.0
+    elapsed = time.time() - requested_at_value
+    return max(0.0, DEVICE_CODE_COOLDOWN_SECONDS - elapsed)
+
+
+def _record_device_code_request(auth_path: Path) -> None:
+    auth_data = _read_auth_file(auth_path) or {}
+    auth_data["device_code_requested_at"] = time.time()
+    _write_auth_file(auth_path, auth_data)
+
+
+async def _wait_for_access_token(
+    auth_path: Path,
+    timeout_seconds: float,
+) -> ChatGPTCredentials | None:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        auth_data = _read_auth_file(auth_path)
+        if auth_data:
+            access_token = auth_data.get("access_token")
+            if isinstance(access_token, str) and access_token:
+                expires_at = _expires_at(auth_data, access_token)
+                if expires_at is not None and time.time() < expires_at - TOKEN_EXPIRY_SKEW_SECONDS:
+                    return ChatGPTCredentials(
+                        access_token=access_token,
+                        account_id=_account_id(auth_data),
+                    )
+        sleep_for = min(
+            DEVICE_CODE_POLL_SLEEP_SECONDS,
+            max(0.0, deadline - time.monotonic()),
+        )
+        if sleep_for <= 0:
+            break
+        await asyncio.sleep(sleep_for)
+    return None
+
+
 async def _device_login(
     session: aiohttp.ClientSession,
     auth_path: Path,
@@ -283,7 +330,14 @@ async def _device_login(
     device_token_url: str,
     oauth_token_url: str,
 ) -> ChatGPTCredentials:
+    cooldown_remaining = _device_code_cooldown_remaining(_read_auth_file(auth_path))
+    if cooldown_remaining > 0:
+        existing = await _wait_for_access_token(auth_path, cooldown_remaining)
+        if existing is not None:
+            return existing
+
     device_code = await _request_device_code(session, device_code_url)
+    _record_device_code_request(auth_path)
     print(
         "ChatGPT subscription sign-in required for llm-gateway:\n"
         f"1) Visit {CHATGPT_DEVICE_VERIFY_URL}\n"
