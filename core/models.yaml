@@ -5,13 +5,13 @@ models:
     mode: responses
     upstream_model: gpt-6-sol
     api_base: https://chatgpt.com/backend-api/codex
-    authorization: chatgpt
+    authorization: client
 
   - id: gpt-6-luna
     mode: responses
     upstream_model: gpt-6-luna
     api_base: https://chatgpt.com/backend-api/codex
-    authorization: chatgpt
+    authorization: client
 
   - id: opencode-go/deepseek-flash
     mode: responses

@@ -297,13 +297,69 @@ function GatewayReady { return ((GatewayHealthy) -and (GatewayModelsMatch)) }
 function WaitGateway([int]$Limit=180){$end=[DateTime]::UtcNow.AddSeconds((Remaining $Limit));while([DateTime]::UtcNow-lt$end){if(GatewayReady){return};Start-Sleep -Seconds 2};Fail 'gateway readiness timeout'}
 function WaitControl([int]$Limit=120){$end=[DateTime]::UtcNow.AddSeconds((Remaining $Limit));while([DateTime]::UtcNow-lt$end){if((Status "$ControlBaseUrl/live")-eq200){return};Start-Sleep -Seconds 2};Fail 'control-plane liveness timeout'}
 function SetTopLevelCodexRouting{
-    $path=$CodexConfig;$text=ReadText $path;$nl=[Environment]::NewLine;$final=$text.EndsWith($nl);$a=[regex]::Split($text,'\r?\n');if($final -and $a.Count -gt 1 -and $a[$a.Count-1] -eq ''){$a=$a[0..($a.Count-2)]};$lines=[System.Collections.Generic.List[string]]::new();foreach($line in $a){$null=$lines.Add($line)}
-    $first=$lines.Count;for($i=0;$i-lt$lines.Count;$i++){if($lines[$i]-match '^\s*\[[^\]]+\]\s*$'){$first=$i;break}}
-    $model=-1;$base=-1;for($i=0;$i-lt$first;$i++){if($lines[$i]-match '^\s*model\s*='){$model=$i}elseif($lines[$i]-match '^\s*openai_base_url\s*='){$base=$i}}
-    if(@($lines|Where-Object{$_-match '^\s*model\s*='}).Count -gt 1){Fail 'duplicate top-level model'};if(@($lines|Where-Object{$_-match '^\s*openai_base_url\s*='}).Count -gt 1){Fail 'duplicate top-level openai_base_url'}
-    if($model-ge0){$lines[$model]='model = "'+$OfficialModel+'"'}else{$lines.Insert($first,'model = "'+$OfficialModel+'"');$model=$first;$first++}
-    if($base-ge0){$lines[$base]='openai_base_url = "'+$CodexBaseUrl+'"' }else{$lines.Insert($model+1,'openai_base_url = "'+$CodexBaseUrl+'"')}
-    $after=[string]::Join($nl,$lines.ToArray());if($final){$after+=$nl};$null=SetText $path $text $after
+    $path=$CodexConfig
+    $text=ReadText $path
+    $nl=[Environment]::NewLine
+    $final=$text.EndsWith($nl)
+
+    # Remove the gateway-owned provider section so reruns stay idempotent.
+    $withoutProvider=[regex]::Replace(
+        $text,
+        '(?ms)^\[model_providers\.llm-gateway\]\s*\r?\n.*?(?=^\[[^\]]+\]\s*$|\z)',
+        ''
+    )
+    $a=[regex]::Split($withoutProvider,'\r?\n')
+    if($final -and $a.Count -gt 1 -and $a[$a.Count-1] -eq ''){$a=$a[0..($a.Count-2)]}
+    $lines=[System.Collections.Generic.List[string]]::new()
+    foreach($line in $a){$null=$lines.Add($line)}
+
+    $first=$lines.Count
+    for($i=0;$i-lt$lines.Count;$i++){
+        if($lines[$i]-match '^\s*\[[^\]]+\]\s*$'){$first=$i;break}
+    }
+
+    foreach($key in @('model','model_provider','openai_base_url')){
+        if(@($lines|Where-Object{$_-match ('^\s*'+[regex]::Escape($key)+'\s*=')}).Count -gt 1){
+            Fail "duplicate top-level $key"
+        }
+    }
+
+    # openai_base_url belongs to the built-in provider and must not be mixed with
+    # the explicit gateway provider.
+    for($i=$first-1;$i-ge0;$i--){
+        if($lines[$i]-match '^\s*openai_base_url\s*='){
+            $lines.RemoveAt($i)
+            $first--
+        }
+    }
+
+    $model=-1
+    $provider=-1
+    for($i=0;$i-lt$first;$i++){
+        if($lines[$i]-match '^\s*model\s*='){$model=$i}
+        elseif($lines[$i]-match '^\s*model_provider\s*='){$provider=$i}
+    }
+    if($model-ge0){$lines[$model]='model = "'+$OfficialModel+'"'}
+    else{$lines.Insert($first,'model = "'+$OfficialModel+'"');$model=$first;$first++}
+    if($provider-ge0){$lines[$provider]='model_provider = "llm-gateway"'}
+    else{$lines.Insert($model+1,'model_provider = "llm-gateway"');$first++}
+
+    while($lines.Count -gt 0 -and [string]::IsNullOrWhiteSpace($lines[$lines.Count-1])){
+        $lines.RemoveAt($lines.Count-1)
+    }
+    if($lines.Count -gt 0){$null=$lines.Add('')}
+    foreach($line in @(
+        '[model_providers.llm-gateway]',
+        'name = "LLM Gateway"',
+        'base_url = "'+$CodexBaseUrl+'"',
+        'wire_api = "responses"',
+        'requires_openai_auth = true',
+        'supports_websockets = false'
+    )){$null=$lines.Add($line)}
+
+    $after=[string]::Join($nl,$lines.ToArray())
+    if($final){$after+=$nl}
+    $null=SetText $path $text $after
 }
 function SetSection([string]$Text,[string]$Section,[string[]]$Keys,[hashtable]$Values){
     $nl=[Environment]::NewLine;$final=$Text.EndsWith($nl);$a=[regex]::Split($Text,'\r?\n');if($final -and $a.Count -gt 1 -and $a[$a.Count-1] -eq ''){$a=$a[0..($a.Count-2)]};$lines=[System.Collections.Generic.List[string]]::new();foreach($line in $a){$null=$lines.Add($line)}
@@ -319,7 +375,7 @@ function UpdatePersistentConfig{
     $before=ReadText $ControlConfig;$t=SetSection $before 'model' @('diagnosis_model','execution_model','gateway_base_url','codex_cli') @{diagnosis_model=$OfficialModel;execution_model=$OfficialModel;gateway_base_url=$AgentBaseUrl;codex_cli=$codexCli};$t=SetSection $t 'agent' @('model','gateway_base_url') @{model=$OfficialModel;gateway_base_url=$AgentBaseUrl};$null=SetText $ControlConfig $before $t
     SetTopLevelCodexRouting
 }
-function GatewayProbe{$body=@{model=$OfficialModel;input=@(@{role='user';content=@(@{type='input_text';text='Reply exactly RATIO_GATEWAY_OK.'})});max_output_tokens=32}|ConvertTo-Json -Depth 8 -Compress;$r=Invoke-WebRequest -Uri "$CodexBaseUrl/responses" -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 120 -SkipHttpErrorCheck;if([int]$r.StatusCode-lt200-or[int]$r.StatusCode-ge300){Fail "gateway Responses probe failed: status=$($r.StatusCode)"}}
+function GatewayProbe{$m=Invoke-RestMethod -Uri "$CodexBaseUrl/models" -TimeoutSec 30;$ids=@($m.data|ForEach-Object{[string]$_.id});if($ids -notcontains $OfficialModel){Fail "gateway catalog probe failed: missing $OfficialModel"}}
 function CodexProbe{
     $exe=ResolveCodexExe;$si=[Diagnostics.ProcessStartInfo]::new();$si.FileName=$exe;$si.WorkingDirectory=$GatewayRoot;$si.UseShellExecute=$false;$si.CreateNoWindow=$true;$si.RedirectStandardOutput=$true;$si.RedirectStandardError=$true;$si.Environment['CODEX_HOME']=$CodexHome
     foreach($a in @('exec','--model',$OfficialModel,'--sandbox','read-only','--skip-git-repo-check','--ephemeral','--json','Return exactly RATIO_CODEX_GATEWAY_OK and nothing else.')){$null=$si.ArgumentList.Add($a)};$p=[Diagnostics.Process]::new();$p.StartInfo=$si

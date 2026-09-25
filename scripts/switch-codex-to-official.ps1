@@ -119,11 +119,21 @@ try {
     Write-Host "Codex 配置已备份: $BackupPath"
 
     $before = [System.IO.File]::ReadAllText($CodexConfig)
-    # Remove only active top-level/custom endpoint settings. Comments and all
-    # other official Codex settings remain unchanged.
+    # Remove only gateway-owned routing settings. Comments and all unrelated
+    # official Codex settings remain unchanged.
     $after = [regex]::Replace(
         $before,
         '(?m)^[ \t]*openai_base_url[ \t]*=[^\r\n]*(?:\r\n|\n|$)',
+        ""
+    )
+    $after = [regex]::Replace(
+        $after,
+        '(?m)^[ \t]*model_provider[ \t]*=[ \t]*"llm-gateway"[ \t]*(?:\r\n|\n|$)',
+        ""
+    )
+    $after = [regex]::Replace(
+        $after,
+        '(?ms)^\[model_providers\.llm-gateway\]\s*\r?\n.*?(?=^\[[^\]]+\]\s*$|\z)',
         ""
     )
 
@@ -142,6 +152,70 @@ try {
     $current = [System.IO.File]::ReadAllText($CodexConfig)
     if ($current -match '(?m)^[ \t]*openai_base_url[ \t]*=') {
         throw "配置仍包含活动的 openai_base_url"
+    }
+    if ($current -match '(?m)^[ \t]*model_provider[ \t]*=[ \t]*"llm-gateway"') {
+        throw "配置仍引用 llm-gateway model_provider"
+    }
+    if ($current -match '(?m)^\[model_providers\.llm-gateway\]\s*
+
+    # Do not regenerate or replace a model catalog here. Model visibility is
+    # owned by the official Codex configuration and the settings it references.
+    $catalogMatch = [regex]::Match(
+        $current,
+        '(?m)^[ \t]*model_catalog_json[ \t]*=[ \t]*"([^"]+)"'
+    )
+    if ($catalogMatch.Success) {
+        $catalogPath = Resolve-ConfigPath -ConfiguredPath $catalogMatch.Groups[1].Value
+        Write-Host "保留 Codex 官方模型显示配置: model_catalog_json=$catalogPath"
+        if (-not (Test-Path -LiteralPath $catalogPath -PathType Leaf)) {
+            Write-Warning "model_catalog_json 指向的文件不存在，Codex 可能回退到内置模型目录: $catalogPath"
+        }
+    }
+    else {
+        Write-Warning "未发现 model_catalog_json；Codex 将使用内置官方模型目录"
+    }
+
+    $modelMatch = [regex]::Match($current, '(?m)^[ \t]*model[ \t]*=[ \t]*"([^"]+)"')
+    if ($modelMatch.Success) {
+        Write-Host "Codex 默认模型保持: $($modelMatch.Groups[1].Value)"
+    }
+
+    $finalTask = Get-ScheduledTask -TaskName $GatewayTaskName -ErrorAction SilentlyContinue
+    if ($null -ne $finalTask -and $finalTask.State -ne "Disabled") {
+        throw "网关计划任务未处于 Disabled: $GatewayTaskName state=$($finalTask.State)"
+    }
+
+    Write-Host "完成：LLM Gateway 已停止，Codex 配置已切换为官方路由。"
+    Write-Host "请完全退出并重新打开 Codex Desktop/CLI；不要在当前会话中强杀 codex.exe。"
+    exit 0
+}
+catch {
+    $message = $_.Exception.Message
+    if (-not $Elevated -and $message -match "(?i)access denied|unauthorized|拒绝访问|权限") {
+        Write-Warning "检测到权限不足，弹出 UAC 后以管理员身份重试。"
+        $args = @(
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            "`"$PSCommandPath`"",
+            "-Elevated"
+        )
+        $child = Start-Process -FilePath $Pwsh -Verb RunAs -ArgumentList $args -Wait -PassThru
+        exit $child.ExitCode
+    }
+
+    Write-Error "切换失败: $message"
+    if ($null -ne $BackupPath) {
+        Write-Host "配置备份仍保留: $BackupPath"
+        Write-Host "回滚配置: Copy-Item -LiteralPath `"$BackupPath`" -Destination `"$CodexConfig`" -Force"
+    }
+    Write-Host "若需恢复网关: Enable-ScheduledTask -TaskName `"$GatewayTaskName`"; pwsh -NoProfile -File `"$Root\scripts\start-agent-gateway.ps1`""
+    exit 1
+}
+) {
+        throw "配置仍包含 llm-gateway provider section"
     }
 
     # Do not regenerate or replace a model catalog here. Model visibility is
