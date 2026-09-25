@@ -206,11 +206,11 @@ try {
 
     if (-not $NoVerify) {
         $AgentCatalog = Invoke-RestMethod -Uri "$AgentUrl/v1/models" -TimeoutSec 20
-        Assert-CatalogMatches -Label 'Agent entry' -Actual (Get-CatalogIds $AgentCatalog) -Expected $ExpectedUnified
+        Assert-CatalogMatches -Label 'Agent entry' -Actual @(Get-CatalogIds $AgentCatalog) -Expected $ExpectedUnified
         $ResponsesCatalog = Invoke-RestMethod -Uri "$ResponsesUrl/v1/models" -TimeoutSec 20
-        Assert-CatalogMatches -Label 'Responses service' -Actual (Get-CatalogIds $ResponsesCatalog) -Expected $ExpectedResponses
+        Assert-CatalogMatches -Label 'Responses service' -Actual @(Get-CatalogIds $ResponsesCatalog) -Expected $ExpectedResponses
         $ChatCatalog = Invoke-RestMethod -Uri "$ChatUrl/v1/models" -TimeoutSec 20
-        Assert-CatalogMatches -Label 'Chat service' -Actual (Get-CatalogIds $ChatCatalog) -Expected $ExpectedChat
+        Assert-CatalogMatches -Label 'Chat service' -Actual @(Get-CatalogIds $ChatCatalog) -Expected $ExpectedChat
     }
 } catch {
     Show-LogTail -Label 'Core stderr' -Path $CoreErr
