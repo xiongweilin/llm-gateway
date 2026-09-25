@@ -1,5 +1,5 @@
 [project]
-name = "litellm-gateway"
+name = "llm-gateway"
 version = "0.1.0"
 description = "独立 LiteLLM 模型网关组件（项目内独立 uv 环境，无数据库）"
 authors = [
@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.scripts]
-litellm-gateway = "litellm_gateway:main"
+llm-gateway = "llm_gateway:main"
 
 [build-system]
 requires = ["uv_build>=0.12.3,<0.13.0"]
