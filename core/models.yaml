@@ -4,14 +4,12 @@ models:
   - id: gpt-6-sol
     mode: responses
     upstream_model: gpt-6-sol
-    api_base_env: CHATGPT_API_BASE
     api_base: https://chatgpt.com/backend-api/codex
     authorization: chatgpt
 
   - id: gpt-6-luna
     mode: responses
     upstream_model: gpt-6-luna
-    api_base_env: CHATGPT_API_BASE
     api_base: https://chatgpt.com/backend-api/codex
     authorization: chatgpt
 

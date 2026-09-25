@@ -10,6 +10,17 @@ from llm_gateway.core_server import build_upstream_headers, create_app
 from fake_provider import FakeProviderServer
 
 
+
+def test_production_chatgpt_routes_cannot_be_redirected_by_chatgpt_api_base(monkeypatch) -> None:
+    monkeypatch.setenv("CHATGPT_API_BASE", "https://api.openai.com/v1")
+    routes = load_model_routes(ROOT / "models.yaml")
+
+    for model_id in ("gpt-6-sol", "gpt-6-luna"):
+        route = routes[model_id]
+        assert route.authorization == "chatgpt"
+        assert route.api_base == "https://chatgpt.com/backend-api/codex"
+
+
 def test_core_forwards_responses_to_the_configured_provider(monkeypatch) -> None:
     provider = FakeProviderServer().start()
     monkeypatch.setenv("FAKE_PROVIDER_API_KEY", "synthetic-test-token")

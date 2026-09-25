@@ -43,7 +43,10 @@ the provider endpoint to be overridden without editing code. Routes using
 `authorization: chatgpt` use the ChatGPT subscription OAuth login rather than
 the client request's API key. Core first reuses the historical LiteLLM token
 store and then the active Codex login at `~/.codex/auth.json`; expired OAuth
-tokens are refreshed without logging or exposing credential values.
+tokens are refreshed without logging or exposing credential values. Production
+ChatGPT subscription routes pin `https://chatgpt.com/backend-api/codex` and do
+not accept the generic `CHATGPT_API_BASE` override, preventing subscription
+credentials from being accidentally sent to `api.openai.com`.
 
 The Core sends requests directly to the configured provider API. The public
 model id remains stable while `upstream_model` selects the provider-side model.

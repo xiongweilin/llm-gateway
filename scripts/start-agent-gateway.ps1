@@ -33,11 +33,7 @@ $CoreUrl = "http://${ListenHost}:$CorePort"
 $AgentUrl = "http://${ListenHost}:$AgentPort"
 $ResponsesUrl = "http://${ListenHost}:$ResponsesPort"
 $ChatUrl = "http://${ListenHost}:$ChatPort"
-$ControlPlaneBackend = if (-not [string]::IsNullOrWhiteSpace($env:CHATGPT_API_BASE)) {
-    $env:CHATGPT_API_BASE.TrimEnd('/')
-} else {
-    [string]$GatewayConfig.control_plane_backend
-}
+$ControlPlaneBackend = [string]$GatewayConfig.control_plane_backend
 
 foreach ($requiredPath in @($ModelsPath, $AgentEntry, $ResponsesEntry, $ChatEntry)) {
     if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {

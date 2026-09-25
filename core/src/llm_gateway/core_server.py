@@ -7,6 +7,7 @@ import logging
 import os
 from collections.abc import Mapping
 from typing import Any
+from urllib.parse import urlparse
 
 import aiohttp
 from aiohttp import web
@@ -167,6 +168,18 @@ def build_upstream_headers(
             if key.lower() == "authorization":
                 del headers[key]
     return headers
+
+
+def _log_route_summary(routes: dict[str, ModelRoute]) -> None:
+    for route in sorted(routes.values(), key=lambda item: item.id):
+        host = urlparse(route.api_base).netloc or "<invalid>"
+        log.info(
+            "route model=%s mode=%s upstream_host=%s authorization=%s",
+            route.id,
+            route.mode,
+            host,
+            route.authorization,
+        )
 
 
 def model_catalog(routes: dict[str, ModelRoute], modes: set[str] | None = None) -> dict[str, Any]:
@@ -349,6 +362,7 @@ def main() -> None:
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     routes = load_model_routes(args.config)
+    _log_route_summary(routes)
     web.run_app(create_app(routes), host=args.host, port=args.port, access_log=None)
 
 
