@@ -108,7 +108,7 @@ async def handle(request: web.Request):
     if request.method == "POST" and request.path == CHAT_PATH:
         try:
             body = await request.read()
-            # aiohttp decodes supported request encodings before this handler.
+            # aiohttp 会在进入此 handler 前解码受支持的 request encoding。
             value = json.loads(body)
         except (json.JSONDecodeError, UnicodeDecodeError):
             return web.json_response(
