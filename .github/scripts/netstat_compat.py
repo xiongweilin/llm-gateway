@@ -22,7 +22,7 @@ def main() -> None:
 
     for line in table.read_text(encoding="ascii").splitlines()[1:]:
         fields = line.split()
-        if len(fields) < 4 or fields[3] != "0A":  # TCP_LISTEN
+        if len(fields) < 4 or fields[3] != "0A":  # TCP_LISTEN（监听状态）
             continue
         local_hex, port_hex = fields[1].split(":", 1)
         address = ipv4_from_proc(local_hex)
