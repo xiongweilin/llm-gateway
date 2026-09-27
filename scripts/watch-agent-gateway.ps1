@@ -1,5 +1,5 @@
-# Monitor the model core, unified Agent entry, Responses service, and Chat service.
-# The filename is retained for the existing scheduled task.
+# 监控 model core、统一 Agent 入口、Responses service 和 Chat service。
+# 为兼容现有 scheduled task，保留此文件名。
 
 #Requires -Version 7.0
 [CmdletBinding()]
@@ -45,7 +45,7 @@ function Write-WatchdogLog([string]$Message) {
         }
         Add-Content -LiteralPath $LogPath -Value "$(Get-Date -Format o) $Message" -Encoding utf8
     } catch {
-        # Monitoring must not terminate recovery because its log is unavailable.
+        # 不能因为监控日志不可用而终止 recovery。
     }
 }
 
