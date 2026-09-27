@@ -120,7 +120,7 @@ def _last_user_text(input_value: Any) -> str:
 class FakeProviderHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
-    # ---- infra ----
+    # ---- 基础设施 ----
     def log_message(self, fmt: str, *args: Any) -> None:  # 静默访问日志
         pass
 
@@ -147,7 +147,7 @@ class FakeProviderHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             REGISTRY.add_abort(path)
 
-    # ---- routes ----
+    # ---- 路由 ----
     def do_GET(self) -> None:  # noqa: N802
         if self.path in ("/health", "/healthz"):
             self._send_json(200, {"status": "ok"})
@@ -175,7 +175,7 @@ class FakeProviderHandler(BaseHTTPRequestHandler):
         else:
             self._send_json(404, {"error": {"type": "not_found", "message": f"unknown path {self.path}"}})
 
-    # ---- Responses API ----
+    # ---- Responses API 路由 ----
     def _handle_responses(self, body: dict[str, Any]) -> None:
         if body.get("stream"):
             self._stream_responses(body)
@@ -189,7 +189,7 @@ class FakeProviderHandler(BaseHTTPRequestHandler):
         want_tool_call = bool(tools) and ("CALL_TOOL" in " ".join(texts) or "CALL_TOOL" in instructions)
         output: list[dict[str, Any]] = []
 
-        # reasoning item
+        # reasoning 条目
         output.append(
             {
                 "id": "rs_canary_1",
@@ -209,7 +209,7 @@ class FakeProviderHandler(BaseHTTPRequestHandler):
                     "arguments": '{"q": "canary-arg"}',
                 }
             )
-        # message item
+        # message 条目
         output.append(
             {
                 "id": "msg_canary_1",
@@ -419,7 +419,7 @@ class FakeProviderHandler(BaseHTTPRequestHandler):
         finally:
             self.close_connection = True
 
-    # ---- Chat Completions ----
+    # ---- Chat Completions 路由 ----
     def _handle_chat_completions(self, body: dict[str, Any]) -> None:
         if body.get("stream"):
             self._stream_chat(body)
