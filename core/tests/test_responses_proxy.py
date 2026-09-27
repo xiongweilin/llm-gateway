@@ -1075,11 +1075,11 @@ def test_custom_exec_json_stream_is_restored_to_executable_javascript() -> None:
 
 
 def test_truncate_input_never_leaves_orphaned_tool_outputs() -> None:
-    # Regression: context truncation dropped a function_call but kept its
-    # function_call_output, leaving an orphaned tool output behind a kept call.
-    # Upstream (OpenCode Go) rejects that with "No tool call found for tool
-    # output". The old boundary trim only removed outputs at the tail edge and
-    # missed orphans sitting behind a kept call in interleaved tool rounds.
+    # 回归场景：context truncation 丢弃了 function_call，却保留了对应的
+    # function_call_output，导致已保留 call 后面出现孤立的 tool output。
+    # 上游（OpenCode Go）会以 "No tool call found for tool
+    # output" 拒绝此输入。旧的 boundary trim 只移除尾部边界的 output，
+    # 会漏掉 interleaved tool round 中位于已保留 call 后面的孤立 output。
     request = {
         "model": "opencode-go/deepseek-flash",
         "input": [
@@ -1094,8 +1094,8 @@ def test_truncate_input_never_leaves_orphaned_tool_outputs() -> None:
     }
     inp = request["input"]
     fixed = proxy._json_tokens({"model": "opencode-go/deepseek-flash", "input": []})
-    # Budget exactly fits head + items[3..]; drops [u1, call_A], keeps call_B
-    # with orphaned output call_A still in the tail.
+    # Budget 恰好容纳 head + items[3..]；丢弃 [u1, call_A]，保留 call_B
+    # 且尾部仍残留孤立的 call_A output。
     budget = fixed + proxy._item_tokens(inp[0]) + sum(proxy._item_tokens(i) for i in inp[3:])
     previous = proxy.INPUT_TOKEN_BUDGET
     proxy.INPUT_TOKEN_BUDGET = budget
