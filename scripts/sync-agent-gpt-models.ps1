@@ -59,8 +59,8 @@ $SupplementalModelDefinitions = [ordered]@{
     #     DisplayName = "Union Alpha Free (OpenCode Go)"
     #     Description = "OpenCode Go Union Alpha Free model routed through the local LLM Gateway."
     #     Priority = 6
-    #     # Upstream context limit has not been published in the supplied model entry.
-    #     # Keep the local catalog conservative until a real protocol probe confirms it.
+    #     # 已提供的 model entry 中尚未公布上游 context limit。
+    #     # 在真实 protocol probe 确认前，保持本地 catalog 保守。
     #     ContextWindow = 400000
     # }
 }
