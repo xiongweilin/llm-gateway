@@ -349,7 +349,7 @@ async def handle(request: web.Request):
 
     expected_mode = "responses" if request.path == PROTOCOL_PATHS["responses"] else "chat"
     try:
-        # aiohttp decodes supported request content encodings before handlers run.
+        # aiohttp 会在 handler 运行前解码受支持的 request content encoding。
         body = await request.read()
         payload = json.loads(body)
     except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
