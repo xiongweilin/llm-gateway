@@ -158,8 +158,8 @@ try {
     }
     if ($current -match '(?m)^\[model_providers\.llm-gateway\]\s*
 
-    # Do not regenerate or replace a model catalog here. Model visibility is
-    # owned by the official Codex configuration and the settings it references.
+    # 不要在这里重新生成或替换 model catalog。模型可见性
+    # 由官方 Codex 配置及其引用的 settings 持有。
     $catalogMatch = [regex]::Match(
         $current,
         '(?m)^[ \t]*model_catalog_json[ \t]*=[ \t]*"([^"]+)"'
@@ -218,8 +218,8 @@ catch {
         throw "配置仍包含 llm-gateway provider section"
     }
 
-    # Do not regenerate or replace a model catalog here. Model visibility is
-    # owned by the official Codex configuration and the settings it references.
+    # 不要在这里重新生成或替换 model catalog。模型可见性
+    # 由官方 Codex 配置及其引用的 settings 持有。
     $catalogMatch = [regex]::Match(
         $current,
         '(?m)^[ \t]*model_catalog_json[ \t]*=[ \t]*"([^"]+)"'
