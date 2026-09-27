@@ -165,7 +165,7 @@ $ExpectedResponses = @($ModelSets.responses | ForEach-Object { [string]$_ })
 $ExpectedChat = @($ModelSets.chat | ForEach-Object { [string]$_ })
 $ExpectedUnified = @(@($ExpectedResponses) + @($ExpectedChat) | Sort-Object -Unique)
 
-# Only listeners owned by this checkout are replaced when the user runs this script.
+# 用户运行此脚本时，只替换由当前 checkout 持有的 listener。
 Stop-OwnedPort -Port $AgentPort -Label 'unified Agent entry'
 Stop-OwnedPort -Port $ResponsesPort -Label 'Responses protocol service'
 Stop-OwnedPort -Port $ChatPort -Label 'Chat Completions service'
