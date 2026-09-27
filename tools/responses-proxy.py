@@ -32,7 +32,7 @@ except ModuleNotFoundError:  # pragma: no cover - direct file loading in tests
 
 log = logging.getLogger("responses-proxy")
 
-# Responses request budget after provider-specific compaction handling.
+# provider-specific compaction 处理后的 Responses request budget。
 INPUT_TOKEN_BUDGET = 950_000
 CONTROL_PLANE_PATH_PREFIX = "/v1/alpha"
 OPENCODE_SESSION_HEADER = "x-opencode-session"
@@ -56,9 +56,9 @@ def _env_int(name: str, default: int, minimum: int) -> int:
     return parsed
 
 
-# These budgets bound the checkpoint that the Responses service creates only after Codex emits
-# an explicit compaction trigger. The historical MUSE_* environment names are
-# retained for deployment compatibility; the current behavior applies to DeepSeek Flash only.
+# 这些 budget 限定 Responses service 仅在 Codex 发出显式 compaction trigger 后创建的 checkpoint。
+# 历史 MUSE_* 环境变量名
+# 为 deployment compatibility 保留；当前行为只适用于 DeepSeek Flash。
 MUSE_COMPACTION_TOKEN_BUDGET = _env_int(
     "MUSE_COMPACTION_TOKEN_BUDGET", 900_000, 10_000
 )
@@ -84,9 +84,9 @@ COLLABORATION_TOOLS = PLAINTEXT_COLLABORATION_TOOLS | {
 }
 PLAINTEXT_COLLABORATION_NAMESPACE = "local_collaboration"
 
-# Responses input item types for tool calls and their outputs. Truncation must
-# never leave an output whose tool call was dropped: upstream providers (e.g.
-# OpenCode Go) reject such inputs with "No tool call found for tool output".
+# Responses input 中 tool call 及其 output 的条目类型。Truncation 绝不能
+# 留下其 tool call 已被丢弃的 output：上游 provider（例如
+# OpenCode Go）会以 "No tool call found for tool output" 拒绝此类输入。
 TOOL_CALL_TYPES = {"function_call", "custom_tool_call", "local_shell_call"}
 TOOL_OUTPUT_TYPES = {
     "custom_tool_call_output",
@@ -245,8 +245,8 @@ def resolve_opencode_session(body: bytes, headers: Mapping[str, str]) -> str | N
     if native_id:
         return _session_for_model(obj.get("model"), native_id)
 
-    # A stable process fallback still satisfies the provider contract when an
-    # older Codex build exposes no native conversation identifier at all.
+    # 当旧版 Codex 完全不暴露 native conversation identifier 时，
+    # 稳定的 process fallback 仍满足 provider contract。
     return _OPENCODE_PROCESS_SESSION
 
 
@@ -670,7 +670,7 @@ def _safe_tail_start(items: list, keep_budget: int) -> int:
         start = index
         accumulated += item_tokens
 
-    # Always retain the newest item, even when it alone exceeds the tail budget.
+    # 始终保留最新条目，即使它单独就超过 tail budget。
     if start == len(items):
         start = len(items) - 1
 
@@ -2115,10 +2115,10 @@ def adapt_collaboration_request(body: bytes) -> bytes:
             and isinstance(call_name, str)
             and call_name in COLLABORATION_TOOLS
         ):
-            # Some OpenCode Go responses flatten a namespaced call all the
-            # way to ``name=spawn_agent``.  Restore the namespace before the
-            # history is sent back upstream, otherwise Codex cannot match it
-            # to the collaboration handler on the next turn.
+            # 某些 OpenCode Go response 会把 namespaced call 一路扁平化
+            # 成 ``name=spawn_agent``。在 history 重新发送给上游前
+            # 恢复 namespace，否则 Codex 无法在下一轮把它
+            # 匹配到 collaboration handler。
             value["namespace"] = "collaboration"
         if (
             value.get("type") == "function_call"
@@ -2184,9 +2184,9 @@ def _force_plaintext_collaboration_calls(value) -> int:
             and isinstance(call_name, str)
             and call_name in COLLABORATION_TOOLS
         ):
-            # OpenCode Go may omit both the namespace field and the dotted
-            # prefix.  These names are reserved for collaboration tools in
-            # Codex, so infer the namespace before returning the response.
+            # OpenCode Go 可能同时省略 namespace field 和 dotted
+            # prefix。这些名称在 Codex 中保留给 collaboration tool，
+            # 因此在返回 response 前推断 namespace。
             value["namespace"] = "collaboration"
             namespace = "collaboration"
     else:
@@ -2387,18 +2387,18 @@ def truncate_input(body: bytes) -> bytes:
     acc = fixed + _item_tokens(head[0])
     for item in reversed(inp[1:]):
         t = _item_tokens(item)
-        # Always retain the newest item even if it alone exceeds the guard.
+        # 始终保留最新条目，即使它单独就超过 guard。
         if tail and acc + t > INPUT_TOKEN_BUDGET:
             break
         tail.append(item)
         acc += t
-    # Reconcile tool call/output pairing after truncation. A dropped tool call
-    # can orphan its output anywhere in the kept tail (parallel tool rounds
-    # interleave calls and outputs, so the orphan may sit behind a kept call
-    # instead of at the old boundary), so match by call id instead of only
-    # trimming outputs at the tail edge. Dropping an output whose call was kept
-    # is never done here: call-without-output is a legitimate in-flight state,
-    # while output-without-call is rejected by strict upstream providers.
+    # Truncation 后重新协调 tool call/output 配对。被丢弃的 tool call
+    # 可能让 output 孤立在已保留 tail 的任意位置（parallel tool round
+    # 会交错 call 和 output，因此孤立 output 可能位于已保留 call 后面，
+    # 而不是旧 boundary），因此应按 call id 匹配，而不是只
+    # 修剪 tail edge 的 output。这里绝不会丢弃其 call 已保留的 output：
+    # call-without-output 是合法的 in-flight state，
+    # 而 output-without-call 会被严格的上游 provider 拒绝。
     kept = head + list(reversed(tail))
     call_ids = {
         _tool_call_id(item)
@@ -2484,8 +2484,8 @@ async def handle(
             status=404,
         )
 
-    # Codex first probes Responses over WebSocket.  Returning 426 makes it
-    # fall back to HTTP without treating the ingress as unavailable.
+    # Codex 会先通过 WebSocket 探测 Responses。返回 426 会让它
+    # 回退到 HTTP，而不会把 ingress 视为不可用。
     if (
         req.headers.get("Upgrade", "").lower() == "websocket"
         and req.path == RESPONSES_PATH
@@ -2503,7 +2503,7 @@ async def handle(
             text='{"error":{"type":"not_found","message":"response not found"}}',
         )
 
-    # aiohttp decodes supported request encodings before application handlers.
+    # aiohttp 会在 application handler 前解码受支持的 request encoding。
     dec = await req.read()
     caller_stream = True
     normalize_function_args = False
@@ -2573,10 +2573,10 @@ async def handle(
             if is_opencode_model(model) and has_namespaced_tools(request_obj):
                 namespaced_tools = collect_opencode_namespaced_tools(dec)
                 dec = normalize_opencode_namespaced_calls(dec)
-            # Earlier compatibility steps may lift ``additional_tools`` into
-            # the top-level ``tools`` field.  Read the transformed body here;
-            # ``request_obj`` still describes the original request and can
-            # otherwise make the provider-specific sanitizers skip the tools.
+            # 前面的 compatibility step 可能把 ``additional_tools`` 提升到
+            # 顶层 ``tools`` field。这里应读取转换后的 body；
+            # ``request_obj`` 仍描述原始 request，可能导致
+            # provider-specific sanitizer 错过这些 tools。
             if is_opencode_model(model):
                 dec = normalize_opencode_search_tool_fields(dec)
                 dec = normalize_opencode_tool_descriptions(dec)
@@ -2869,7 +2869,7 @@ async def main() -> None:
     # 1MB 请求体上限会返回 413；调大至 128MB。
     app = aiohttp.web.Application(client_max_size=128 * 1024 * 1024)
     connector = aiohttp.TCPConnector(limit=64)
-    # Provider/control-plane HTTP may use the host's configured system proxy.
+    # Provider/control-plane HTTP 可以使用宿主机配置的 system proxy。
     session = aiohttp.ClientSession(connector=connector, trust_env=True)
 
     async def route_handler(request):
