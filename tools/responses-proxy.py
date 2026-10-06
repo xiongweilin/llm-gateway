@@ -2465,6 +2465,46 @@ def normalize_scalar_responses_input(body: bytes) -> bytes:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
 
 
+REPLAY_SAFE_BACKEND_ATTEMPTS = 4
+
+
+def _replay_safe_responses_request(
+    *,
+    method: str,
+    path: str,
+    caller_stream: bool,
+    request_obj: dict,
+    using_control_plane: bool,
+) -> bool:
+    """Return whether a backend retry is externally unobservable to the caller."""
+    return (
+        method == "POST"
+        and path == RESPONSES_PATH
+        and not caller_stream
+        and request_obj.get("store") is False
+        and not using_control_plane
+    )
+
+
+def _core_transient_upstream_error(status: int, body: bytes) -> bool:
+    """Recognize the Core's explicit transient provider-transport error."""
+    if status != 502:
+        return False
+    try:
+        value = json.loads(body)
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        isinstance(value, dict)
+        and isinstance(value.get("error"), dict)
+        and value["error"].get("type") == "upstream_error"
+    )
+
+
+def _backend_retry_delay(attempt: int) -> float:
+    return float(min(2**attempt, 4))
+
+
 async def handle(
     req: aiohttp.web.Request,
     backend: str,
@@ -2736,80 +2776,151 @@ async def handle(
         strip_v1_prefix=using_control_plane,
     )
 
-    try:
-        async with session.request(
-            req.method,
-            url,
-            data=dec,
-            headers=headers,
-            compress=False,
-            timeout=aiohttp.ClientTimeout(total=4200),
-        ) as up:
-            upstream_is_sse = "text/event-stream" in up.headers.get("Content-Type", "").lower()
+    replay_safe = _replay_safe_responses_request(
+        method=req.method,
+        path=req.path,
+        caller_stream=caller_stream,
+        request_obj=request_obj,
+        using_control_plane=using_control_plane,
+    )
+    backend_attempts = REPLAY_SAFE_BACKEND_ATTEMPTS if replay_safe else 1
 
-            if req.method == "POST" and req.path == RESPONSES_PATH and not caller_stream and upstream_is_sse:
-                upstream_body = await up.read()
-                aggregated, rewritten_calls = aggregate_responses_sse(
-                    upstream_body,
-                    normalize_function_args=normalize_function_args,
-                    namespaced_tools=namespaced_tools,
-                    custom_tool_names=custom_tool_names,
-                    rewrite_collaboration=collaboration_compatibility,
-                )
-                if aggregated is not None:
+    for backend_attempt in range(backend_attempts):
+        try:
+            async with session.request(
+                req.method,
+                url,
+                data=dec,
+                headers=headers,
+                compress=False,
+                timeout=aiohttp.ClientTimeout(total=4200),
+            ) as up:
+                upstream_is_sse = "text/event-stream" in up.headers.get("Content-Type", "").lower()
+
+                if replay_safe and up.status == 502:
+                    upstream_body = await up.read()
+                    if (
+                        _core_transient_upstream_error(up.status, upstream_body)
+                        and backend_attempt + 1 < backend_attempts
+                    ):
+                        delay = _backend_retry_delay(backend_attempt)
+                        log.warning(
+                            "replay-safe backend retry after Core upstream error "
+                            "attempt=%d/%d delay=%.1fs",
+                            backend_attempt + 1,
+                            backend_attempts,
+                            delay,
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    response_headers = {
+                        key: value
+                        for key, value in up.headers.items()
+                        if key.lower()
+                        not in {"content-length", "transfer-encoding", "connection"}
+                    }
+                    return aiohttp.web.Response(
+                        status=up.status,
+                        body=upstream_body,
+                        headers=response_headers,
+                    )
+
+                if req.method == "POST" and req.path == RESPONSES_PATH and not caller_stream and upstream_is_sse:
+                    upstream_body = await up.read()
+                    aggregated, rewritten_calls = aggregate_responses_sse(
+                        upstream_body,
+                        normalize_function_args=normalize_function_args,
+                        namespaced_tools=namespaced_tools,
+                        custom_tool_names=custom_tool_names,
+                        rewrite_collaboration=collaboration_compatibility,
+                    )
+                    if aggregated is not None:
+                        response_headers = {
+                            key: value
+                            for key, value in up.headers.items()
+                            if key.lower()
+                            not in {"content-length", "content-type", "transfer-encoding", "connection"}
+                        }
+                        if rewritten_calls:
+                            log.info(
+                                "response compatibility: normalized_function_args_or_collaboration=%d",
+                                rewritten_calls,
+                            )
+                        return aiohttp.web.Response(
+                            status=up.status,
+                            body=aggregated,
+                            headers=response_headers,
+                            content_type="application/json",
+                        )
+                    if replay_safe and backend_attempt + 1 < backend_attempts:
+                        delay = _backend_retry_delay(backend_attempt)
+                        log.warning(
+                            "replay-safe backend retry after incomplete SSE "
+                            "attempt=%d/%d delay=%.1fs",
+                            backend_attempt + 1,
+                            backend_attempts,
+                            delay,
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    if replay_safe:
+                        return aiohttp.web.Response(
+                            status=502,
+                            text="unified-protocol-proxy: incomplete backend response",
+                        )
+
+                if req.method == "GET" and req.path == MODELS_PATH and 200 <= up.status < 300:
+                    upstream_body = await up.read()
+                    filtered = filter_models_response(upstream_body, responses_models)
                     response_headers = {
                         key: value
                         for key, value in up.headers.items()
                         if key.lower()
                         not in {"content-length", "content-type", "transfer-encoding", "connection"}
                     }
-                    if rewritten_calls:
-                        log.info(
-                            "response compatibility: normalized_function_args_or_collaboration=%d",
-                            rewritten_calls,
-                        )
                     return aiohttp.web.Response(
                         status=up.status,
-                        body=aggregated,
+                        body=filtered,
                         headers=response_headers,
                         content_type="application/json",
                     )
-            if req.method == "GET" and req.path == MODELS_PATH and 200 <= up.status < 300:
-                upstream_body = await up.read()
-                filtered = filter_models_response(upstream_body, responses_models)
-                response_headers = {
-                    key: value
-                    for key, value in up.headers.items()
-                    if key.lower()
-                    not in {"content-length", "content-type", "transfer-encoding", "connection"}
-                }
-                return aiohttp.web.Response(
-                    status=up.status,
-                    body=filtered,
-                    headers=response_headers,
-                    content_type="application/json",
-                )
-            response = prepared_stream_response or aiohttp.web.StreamResponse(status=up.status)
-            if prepared_stream_response is None:
-                for key, value in up.headers.items():
-                    if key.lower() in {"content-length", "transfer-encoding", "connection"}:
+                response = prepared_stream_response or aiohttp.web.StreamResponse(status=up.status)
+                if prepared_stream_response is None:
+                    for key, value in up.headers.items():
+                        if key.lower() in {"content-length", "transfer-encoding", "connection"}:
+                            continue
+                        response.headers[key] = value
+                    await response.prepare(req)
+                elif not 200 <= up.status < 300:
+                    log.warning(
+                        "Muse upstream returned HTTP %d after compaction response started",
+                        up.status,
+                    )
+                rewrite_sse = req.path == RESPONSES_PATH and upstream_is_sse
+                pending = b""
+                rewritten_calls = 0
+                async for chunk in up.content.iter_any():
+                    if not chunk:
                         continue
-                    response.headers[key] = value
-                await response.prepare(req)
-            elif not 200 <= up.status < 300:
-                log.warning(
-                    "Muse upstream returned HTTP %d after compaction response started",
-                    up.status,
-                )
-            rewrite_sse = req.path == RESPONSES_PATH and upstream_is_sse
-            pending = b""
-            rewritten_calls = 0
-            async for chunk in up.content.iter_any():
-                if not chunk:
-                    continue
-                if rewrite_sse:
-                    out, pending, changed = rewrite_sse_collaboration_calls(
-                        pending + chunk,
+                    if rewrite_sse:
+                        out, pending, changed = rewrite_sse_collaboration_calls(
+                            pending + chunk,
+                            normalize_function_args=normalize_function_args,
+                            namespaced_tools=namespaced_tools,
+                            custom_tool_names=custom_tool_names,
+                            custom_call_item_ids=custom_call_item_ids,
+                            custom_call_argument_buffers=custom_call_argument_buffers,
+                            rewrite_collaboration=collaboration_compatibility,
+                        )
+                        rewritten_calls += changed
+                        if out:
+                            await response.write(out)
+                    else:
+                        await response.write(chunk)
+                if rewrite_sse and pending:
+                    out, _, changed = rewrite_sse_collaboration_calls(
+                        pending,
+                        final=True,
                         normalize_function_args=normalize_function_args,
                         namespaced_tools=namespaced_tools,
                         custom_tool_names=custom_tool_names,
@@ -2820,39 +2931,45 @@ async def handle(
                     rewritten_calls += changed
                     if out:
                         await response.write(out)
-                else:
-                    await response.write(chunk)
-            if rewrite_sse and pending:
-                out, _, changed = rewrite_sse_collaboration_calls(
-                    pending,
-                    final=True,
-                    normalize_function_args=normalize_function_args,
-                    namespaced_tools=namespaced_tools,
-                    custom_tool_names=custom_tool_names,
-                    custom_call_item_ids=custom_call_item_ids,
-                    custom_call_argument_buffers=custom_call_argument_buffers,
-                    rewrite_collaboration=collaboration_compatibility,
+                if rewritten_calls:
+                    log.info(
+                        "response compatibility: normalized_function_args_or_collaboration=%d",
+                        rewritten_calls,
+                    )
+                await response.write_eof()
+                return response
+        except asyncio.CancelledError:
+            raise
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            if replay_safe and backend_attempt + 1 < backend_attempts:
+                delay = _backend_retry_delay(backend_attempt)
+                log.warning(
+                    "replay-safe backend retry after transport failure "
+                    "type=%s attempt=%d/%d delay=%.1fs",
+                    type(exc).__name__,
+                    backend_attempt + 1,
+                    backend_attempts,
+                    delay,
                 )
-                rewritten_calls += changed
-                if out:
-                    await response.write(out)
-            if rewritten_calls:
-                log.info(
-                    "response compatibility: normalized_function_args_or_collaboration=%d",
-                    rewritten_calls,
+                await asyncio.sleep(delay)
+                continue
+            log.warning("backend request failed: %s", exc)
+            if prepared_stream_response is not None:
+                return await _finish_prepared_stream_error(
+                    prepared_stream_response,
+                    "unified-protocol-proxy: backend unreachable",
                 )
-            await response.write_eof()
-            return response
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        log.warning("backend request failed: %s", exc)
-        if prepared_stream_response is not None:
-            return await _finish_prepared_stream_error(
-                prepared_stream_response,
-                "unified-protocol-proxy: backend unreachable",
-            )
-        return aiohttp.web.Response(status=502, text="unified-protocol-proxy: backend unreachable")
+            return aiohttp.web.Response(status=502, text="unified-protocol-proxy: backend unreachable")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("backend request failed: %s", exc)
+            if prepared_stream_response is not None:
+                return await _finish_prepared_stream_error(
+                    prepared_stream_response,
+                    "unified-protocol-proxy: backend unreachable",
+                )
+            return aiohttp.web.Response(status=502, text="unified-protocol-proxy: backend unreachable")
+
+    return aiohttp.web.Response(status=502, text="unified-protocol-proxy: backend retries exhausted")
 
 
 async def main() -> None:
