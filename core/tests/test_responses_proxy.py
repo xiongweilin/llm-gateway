@@ -3,6 +3,10 @@ import importlib.util
 import json
 from pathlib import Path
 
+import aiohttp
+import aiohttp.web
+from aiohttp.test_utils import TestClient, TestServer
+
 PROXY_PATH = Path(__file__).parents[2] / "tools" / "responses-proxy.py"
 SPEC = importlib.util.spec_from_file_location("responses_proxy", PROXY_PATH)
 assert SPEC and SPEC.loader
@@ -1263,3 +1267,203 @@ def test_set_opencode_session_replaces_embedded_epoch_without_touching_gpt() -> 
     assert proxy.set_opencode_session(json.dumps(gpt).encode(), "must-not-apply") == json.dumps(
         gpt
     ).encode()
+
+
+def test_replay_safe_retry_scope_is_narrow() -> None:
+    assert proxy._replay_safe_responses_request(
+        method="POST",
+        path=proxy.RESPONSES_PATH,
+        caller_stream=False,
+        request_obj={"store": False},
+        using_control_plane=False,
+    )
+    assert not proxy._replay_safe_responses_request(
+        method="POST",
+        path=proxy.RESPONSES_PATH,
+        caller_stream=True,
+        request_obj={"store": False},
+        using_control_plane=False,
+    )
+    assert not proxy._replay_safe_responses_request(
+        method="POST",
+        path=proxy.RESPONSES_PATH,
+        caller_stream=False,
+        request_obj={"store": True},
+        using_control_plane=False,
+    )
+    assert not proxy._replay_safe_responses_request(
+        method="GET",
+        path=proxy.MODELS_PATH,
+        caller_stream=False,
+        request_obj={"store": False},
+        using_control_plane=False,
+    )
+    assert not proxy._replay_safe_responses_request(
+        method="POST",
+        path=proxy.RESPONSES_PATH,
+        caller_stream=False,
+        request_obj={"store": False},
+        using_control_plane=True,
+    )
+
+
+def test_core_transient_upstream_error_requires_explicit_marker() -> None:
+    transient = json.dumps(
+        {"error": {"type": "upstream_error", "message": "provider request failed"}}
+    ).encode()
+    assert proxy._core_transient_upstream_error(502, transient)
+    assert not proxy._core_transient_upstream_error(503, transient)
+    assert not proxy._core_transient_upstream_error(
+        502,
+        json.dumps({"error": {"type": "configuration_error"}}).encode(),
+    )
+    assert not proxy._core_transient_upstream_error(502, b"bad gateway")
+
+
+def test_nonstream_store_false_retries_explicit_core_upstream_error() -> None:
+    attempts = 0
+
+    async def exercise() -> None:
+        nonlocal attempts
+
+        async def backend_handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return aiohttp.web.json_response(
+                    {
+                        "error": {
+                            "type": "upstream_error",
+                            "message": "provider request failed",
+                        }
+                    },
+                    status=502,
+                )
+            completed = {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_retry_test",
+                    "object": "response",
+                    "status": "completed",
+                    "output": [],
+                    "usage": {
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                        "total_tokens": 2,
+                    },
+                },
+            }
+            wire = b"data: " + json.dumps(completed).encode() + b"\n\n"
+            return aiohttp.web.Response(
+                status=200,
+                body=wire,
+                content_type="text/event-stream",
+            )
+
+        backend_app = aiohttp.web.Application()
+        backend_app.router.add_route("*", "/{tail:.*}", backend_handler)
+        backend_server = TestServer(backend_app)
+        await backend_server.start_server()
+        backend_url = str(backend_server.make_url("/")).rstrip("/")
+
+        session = aiohttp.ClientSession()
+        proxy_app = aiohttp.web.Application()
+
+        async def proxy_handler(request: aiohttp.web.Request):
+            return await proxy.handle(
+                request,
+                backend_url,
+                session,
+                None,
+                {"gpt-6-luna"},
+            )
+
+        proxy_app.router.add_route("*", "/{tail:.*}", proxy_handler)
+        client = TestClient(TestServer(proxy_app))
+        await client.start_server()
+        try:
+            response = await client.post(
+                proxy.RESPONSES_PATH,
+                json={
+                    "model": "gpt-6-luna",
+                    "input": "hello",
+                    "stream": False,
+                    "store": False,
+                },
+            )
+            assert response.status == 200
+            body = await response.json()
+            assert body["id"] == "resp_retry_test"
+        finally:
+            await client.close()
+            await session.close()
+            await backend_server.close()
+
+    original_delay = proxy._backend_retry_delay
+    proxy._backend_retry_delay = lambda attempt: 0.0
+    try:
+        asyncio.run(exercise())
+    finally:
+        proxy._backend_retry_delay = original_delay
+
+    assert attempts == 2
+
+
+def test_nonstream_store_true_does_not_retry_core_upstream_error() -> None:
+    attempts = 0
+
+    async def exercise() -> None:
+        nonlocal attempts
+
+        async def backend_handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
+            nonlocal attempts
+            attempts += 1
+            return aiohttp.web.json_response(
+                {
+                    "error": {
+                        "type": "upstream_error",
+                        "message": "provider request failed",
+                    }
+                },
+                status=502,
+            )
+
+        backend_app = aiohttp.web.Application()
+        backend_app.router.add_route("*", "/{tail:.*}", backend_handler)
+        backend_server = TestServer(backend_app)
+        await backend_server.start_server()
+        backend_url = str(backend_server.make_url("/")).rstrip("/")
+
+        session = aiohttp.ClientSession()
+        proxy_app = aiohttp.web.Application()
+
+        async def proxy_handler(request: aiohttp.web.Request):
+            return await proxy.handle(
+                request,
+                backend_url,
+                session,
+                None,
+                {"gpt-6-luna"},
+            )
+
+        proxy_app.router.add_route("*", "/{tail:.*}", proxy_handler)
+        client = TestClient(TestServer(proxy_app))
+        await client.start_server()
+        try:
+            response = await client.post(
+                proxy.RESPONSES_PATH,
+                json={
+                    "model": "gpt-6-luna",
+                    "input": "hello",
+                    "stream": False,
+                    "store": True,
+                },
+            )
+            assert response.status == 502
+        finally:
+            await client.close()
+            await session.close()
+            await backend_server.close()
+
+    asyncio.run(exercise())
+    assert attempts == 1
