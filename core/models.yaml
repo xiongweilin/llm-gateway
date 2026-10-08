@@ -2,9 +2,9 @@
 # ChatGPT OAuth uses ~/.config/llm/chatgpt/auth.json; other provider secrets
 # use their configured environment variables.
 models:
-  - id: gpt-6-sol
+  - id: gpt-6.1-sol
     mode: responses
-    upstream_model: gpt-6-sol
+    upstream_model: gpt-6.1-sol
     api_base: https://chatgpt.com/backend-api/codex
     authorization: chatgpt
 

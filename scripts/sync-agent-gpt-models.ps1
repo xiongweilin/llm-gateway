@@ -1,35 +1,30 @@
-# 同步客户端模型目录。
+# 同步 Codex 模型目录与 Gateway GPT 路由。
 #
 # 默认行为：
-# - 运行时缓存和显示目录保留两个官方 GPT 模型，
-#   并追加受控的 supplemental models；
+# - 从当前 Codex 二进制附带的模型目录发现最新 sol/luna；
+# - Codex 运行时缓存、显示目录和 Gateway 路由只保留各系列最新版本；
+# - 追加受控的 supplemental models；
 # - 清理其他模型，保持固定顺序并去重；
 # - 只在生成并校验完整内容后替换目标文件，失败不会破坏现有配置；
-# - 本脚本只维护客户端模型目录，不生成或决定 gateway route configuration。
+# - 路由变化后重启 Gateway，使旧模型 ID 立即不可调用。
 
 param(
     [string]$CatalogPath = (Join-Path $env:USERPROFILE ".codex\models_cache.json"),
     [string]$CodexDisplayCatalogPath = (Join-Path $env:USERPROFILE ".codex\models.json"),
-    [string]$CodexConfigPath = (Join-Path $env:USERPROFILE ".codex\config.toml"),
-    [switch]$CheckOnly
+    [string]$GatewayConfigPath = (Join-Path $PSScriptRoot "..\config\gateway.json"),
+    [string]$GatewayModelsPath,
+    [string]$GatewayStartScript = (Join-Path $PSScriptRoot "start-agent-gateway.ps1"),
+    [switch]$CheckOnly,
+    [switch]$NoRestart
 )
 
 $ErrorActionPreference = "Stop"
 
-# 2026-09-23：模型列表收敛为三个 —— gpt-6-sol、gpt-6-luna、
-# opencode-go/deepseek-flash；顺序也是对外显示和路由顺序。
-# 其余模型定义保留为注释，恢复时取消注释并加回集合。
-$AllowedModelSlugs = @(
-    "gpt-6-sol",
-    "gpt-6-luna"
-    # "gpt-5.6-sol",
-    # "gpt-5.6-terra",
-    # "gpt-5.6-luna"
-)
+# Model IDs are discovered from the installed Codex bundled catalog at run time.
+$AllowedModelSlugs = @()
 $OfficialModelContextWindowOverrides = @{
-    # 自 gpt-5.6-sol 沿用，待官方目录刷新后复核。
+    # Retained only for the exact model this historical override names.
     "gpt-6-sol" = 1050000
-    # "gpt-5.6-sol" = 1050000
 }
 $SupplementalModelDefinitions = [ordered]@{
     "opencode-go/deepseek-flash" = [ordered]@{
@@ -65,7 +60,7 @@ $SupplementalModelDefinitions = [ordered]@{
     # }
 }
 $SupplementalModelSlugs = @($SupplementalModelDefinitions.Keys)
-$ManagedModelSlugs = @($AllowedModelSlugs + $SupplementalModelSlugs)
+$ManagedModelSlugs = @()
 
 function Add-UniqueModel {
     param(
@@ -80,16 +75,84 @@ function Add-UniqueModel {
 }
 
 function Read-ModelCatalog {
-    if (-not (Test-Path -LiteralPath $CatalogPath)) {
-        throw "Codex 官方模型缓存不存在；请先启动一次 Codex: $CatalogPath"
+    $codexCommand = Get-Command codex.exe -CommandType Application -ErrorAction Stop |
+        Select-Object -First 1
+    $raw = & $codexCommand.Source debug models --bundled 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+        throw "读取 Codex bundled model catalog 失败（exit=$LASTEXITCODE）：$raw"
     }
-
     try {
-        return Get-Content -Raw -LiteralPath $CatalogPath | ConvertFrom-Json
+        $catalog = $raw | ConvertFrom-Json
     }
     catch {
-        throw "Codex 官方模型缓存无法解析: $($_.Exception.Message)"
+        throw "Codex bundled model catalog 无法解析: $($_.Exception.Message)"
     }
+    if ($null -eq $catalog.models -or $catalog.models -isnot [array]) {
+        throw "Codex bundled model catalog 没有 models 数组"
+    }
+    return $catalog
+}
+
+function Compare-ModelVersion {
+    param(
+        [Parameter(Mandatory)][string]$Left,
+        [Parameter(Mandatory)][string]$Right
+    )
+
+    $leftParts = @($Left -split '\.' | ForEach-Object { [int]::Parse($_) })
+    $rightParts = @($Right -split '\.' | ForEach-Object { [int]::Parse($_) })
+    $partCount = [Math]::Max($leftParts.Count, $rightParts.Count)
+    for ($index = 0; $index -lt $partCount; $index++) {
+        $leftPart = if ($index -lt $leftParts.Count) { $leftParts[$index] } else { 0 }
+        $rightPart = if ($index -lt $rightParts.Count) { $rightParts[$index] } else { 0 }
+        if ($leftPart -gt $rightPart) { return 1 }
+        if ($leftPart -lt $rightPart) { return -1 }
+    }
+    return 0
+}
+
+function Get-LatestOfficialModelSlugs {
+    param([Parameter(Mandatory)][object]$Catalog)
+
+    $latest = @{}
+    foreach ($model in $Catalog.models) {
+        $match = [regex]::Match(
+            [string]$model.slug,
+            '^gpt-(?<version>\d+(?:\.\d+)*?)-(?<family>sol|luna)$'
+        )
+        if (-not $match.Success) { continue }
+        if ([string]$model.visibility -cne "list" -or $model.supported_in_api -ne $true) {
+            continue
+        }
+
+        $family = $match.Groups["family"].Value
+        $version = $match.Groups["version"].Value
+        if (-not $latest.ContainsKey($family)) {
+            $latest[$family] = [pscustomobject]@{
+                Slug = [string]$model.slug
+                Version = $version
+            }
+            continue
+        }
+
+        $comparison = Compare-ModelVersion -Left $version -Right $latest[$family].Version
+        if ($comparison -gt 0) {
+            $latest[$family] = [pscustomobject]@{
+                Slug = [string]$model.slug
+                Version = $version
+            }
+        }
+        elseif ($comparison -eq 0 -and [string]$model.slug -cne $latest[$family].Slug) {
+            throw "Codex catalog has ambiguous $family model IDs at version $version"
+        }
+    }
+
+    foreach ($family in @("sol", "luna")) {
+        if (-not $latest.ContainsKey($family)) {
+            throw "Codex bundled model catalog has no visible, API-supported gpt-$family model"
+        }
+    }
+    return @($latest["sol"].Slug, $latest["luna"].Slug)
 }
 
 function Set-ModelProperty {
@@ -99,6 +162,7 @@ function Set-ModelProperty {
         [Parameter(Mandatory)]
         [string]$Name,
         [Parameter(Mandatory)]
+        [AllowNull()]
         [object]$Value
     )
 
@@ -190,8 +254,11 @@ function Get-ManagedCatalogModels {
         ) | Select-Object -First 1
 
         if ($null -eq $supplemental) {
+            $templateSlug = @(
+                $AllowedModelSlugs | Where-Object { $_ -match '-luna$' }
+            ) | Select-Object -First 1
             $template = @(
-                $existingModels | Where-Object { [string]$_.slug -eq "gpt-6-luna" }
+                $existingModels | Where-Object { [string]$_.slug -eq $templateSlug }
             ) | Select-Object -First 1
             if ($null -eq $template) {
                 throw "无法为 OpenCode Go 模型找到 Codex 元数据模板: $supplementalSlug"
@@ -261,38 +328,107 @@ function Sync-CodexRuntimeCatalog {
     }
 }
 
-function Read-CodexDisplayCatalog {
-    if (Test-Path -LiteralPath $CodexDisplayCatalogPath) {
+function Get-ManagedDisplayCatalogModels {
+    param(
+        [Parameter(Mandatory)][object]$SourceCatalog,
+        [Parameter(Mandatory)][object]$ExistingCatalog
+    )
+
+    if ($null -eq $ExistingCatalog.models) {
+        throw "Codex 显示模型目录没有 models 数组"
+    }
+    $existingModels = @($ExistingCatalog.models)
+    $updatedModels = [System.Collections.Generic.List[object]]::new()
+
+    foreach ($slug in $AllowedModelSlugs) {
+        $sourceModel = @(
+            $SourceCatalog.models | Where-Object { [string]$_.slug -ceq $slug }
+        ) | Select-Object -First 1
+        if ($null -eq $sourceModel) {
+            throw "Codex bundled model catalog 缺少最新模型: $slug"
+        }
+        $displayModel = @(
+            $existingModels | Where-Object { [string]$_.slug -ceq $slug }
+        ) | Select-Object -First 1
+        if ($null -eq $displayModel) {
+            $family = if ($slug -match '-sol$') { 'sol' } else { 'luna' }
+            $displayModel = @(
+                $existingModels | Where-Object {
+                    [string]$_.slug -match "^gpt-\d+(?:\.\d+)*-$family$"
+                }
+            ) | Select-Object -First 1
+        }
+        if ($null -eq $displayModel) {
+            throw "无法为 Codex 显示模型创建 $slug 的目录元数据模板"
+        }
+
+        $displayModel = $displayModel | ConvertTo-Json -Depth 100 | ConvertFrom-Json
+        foreach ($property in $sourceModel.PSObject.Properties) {
+            Set-ModelProperty -Object $displayModel -Name $property.Name -Value $property.Value
+        }
+        Set-ModelProperty -Object $displayModel -Name "slug" -Value $slug
+        Set-ModelProperty -Object $displayModel -Name "visibility" -Value "list"
+        Set-ModelProperty -Object $displayModel -Name "supported_in_api" -Value $true
+        $contextWindowOverride = $OfficialModelContextWindowOverrides[$slug]
+        if ($null -ne $contextWindowOverride) {
+            Set-ModelProperty -Object $displayModel -Name "context_window" -Value $contextWindowOverride
+            Set-ModelProperty -Object $displayModel -Name "max_context_window" -Value $contextWindowOverride
+        }
+        if ($null -eq $displayModel.PSObject.Properties['supports_parallel_tool_calls']) {
+            throw "Codex 显示目录模板缺少必需字段 supports_parallel_tool_calls: $slug"
+        }
+        [void]$updatedModels.Add($displayModel)
+    }
+
+    foreach ($supplementalSlug in $SupplementalModelSlugs) {
+        $supplemental = @(
+            $existingModels | Where-Object { [string]$_.slug -ceq $supplementalSlug }
+        ) | Select-Object -First 1
+        if ($null -eq $supplemental) {
+            $templateSlug = @(
+                $AllowedModelSlugs | Where-Object { $_ -match '-luna$' }
+            ) | Select-Object -First 1
+            $template = @(
+                $updatedModels | Where-Object { [string]$_.slug -ceq $templateSlug }
+            ) | Select-Object -First 1
+            if ($null -eq $template) {
+                throw "无法为 OpenCode Go 模型找到 Codex 显示目录模板: $supplementalSlug"
+            }
+            $supplemental = New-SupplementalCodexModel -TemplateModel $template -Slug $supplementalSlug
+        }
+        else {
+            $supplemental = $supplemental | ConvertTo-Json -Depth 100 | ConvertFrom-Json
+            [void](Set-SupplementalCodexModelMetadata -Object $supplemental -Slug $supplementalSlug)
+        }
+        if ($null -eq $supplemental.PSObject.Properties['supports_parallel_tool_calls']) {
+            throw "Codex 显示目录模板缺少必需字段 supports_parallel_tool_calls: $supplementalSlug"
+        }
+        [void]$updatedModels.Add($supplemental)
+    }
+
+    return $updatedModels.ToArray()
+}
+
+function Sync-CodexDisplayCatalog {
+    param([Parameter(Mandatory)][object]$SourceCatalog)
+
+    if (Test-Path -LiteralPath $CodexDisplayCatalogPath -PathType Leaf) {
         try {
-            return Get-Content -Raw -LiteralPath $CodexDisplayCatalogPath | ConvertFrom-Json
+            $catalog = Get-Content -Raw -LiteralPath $CodexDisplayCatalogPath | ConvertFrom-Json
         }
         catch {
             throw "Codex 显示模型目录无法解析: $($_.Exception.Message)"
         }
     }
-
-    $codexCommand = Get-Command codex -ErrorAction Stop
-    $raw = & $codexCommand.Source debug models 2>$null | Out-String
-    if ($LASTEXITCODE -ne 0) {
-        throw "无法读取 Codex 当前模型目录，codex debug models 退出码: $LASTEXITCODE"
+    else {
+        $catalog = $SourceCatalog | ConvertTo-Json -Depth 100 | ConvertFrom-Json
     }
-
-    try {
-        return $raw | ConvertFrom-Json
-    }
-    catch {
-        throw "Codex 模型目录输出无法解析: $($_.Exception.Message)"
-    }
-}
-
-function Sync-CodexDisplayCatalog {
-    $catalog = Read-CodexDisplayCatalog
     if ($null -eq $catalog.models) {
         throw "Codex 显示模型目录没有 models 数组"
     }
 
     $existingJson = $catalog | ConvertTo-Json -Depth 100
-    $catalog.models = @(Get-ManagedCatalogModels -Catalog $catalog)
+    $catalog.models = @(Get-ManagedDisplayCatalogModels -SourceCatalog $SourceCatalog -ExistingCatalog $catalog)
     $catalogDirectory = Split-Path -Parent $CodexDisplayCatalogPath
     if (-not (Test-Path -LiteralPath $catalogDirectory)) {
         throw "Codex 显示模型目录所在目录不存在: $catalogDirectory"
@@ -347,64 +483,168 @@ function Sync-CodexDisplayCatalog {
     }
 }
 
-function Ensure-CodexDisplayCatalogConfig {
-    if (-not (Test-Path -LiteralPath $CodexConfigPath)) {
-        throw "Codex 配置不存在: $CodexConfigPath"
+function Get-GatewayModelsPlan {
+    param(
+        [Parameter(Mandatory)][string]$Content,
+        [Parameter(Mandatory)][string[]]$LatestSlugs
+    )
+
+    $lineEnding = if ($Content.Contains(([string][char]13 + [char]10))) {
+        ([string][char]13 + [char]10)
+    } else {
+        [string][char]10
     }
-
-    $configuredPath = $CodexDisplayCatalogPath.Replace("\", "/")
-    $setting = 'model_catalog_json = "' + $configuredPath + '"'
-    $lines = [System.IO.File]::ReadAllLines($CodexConfigPath)
-    $updatedLines = [System.Collections.Generic.List[string]]::new()
-    $found = $false
-
-    foreach ($line in $lines) {
-        if ($line -match '^\s*model_catalog_json\s*=') {
-            if (-not $found) {
-                $indent = $line.Substring(0, $line.Length - $line.TrimStart().Length)
-                [void]$updatedLines.Add("$indent$setting")
-                $found = $true
-            }
-        }
-        else {
-            [void]$updatedLines.Add($line)
-            if (-not $found -and $line -match '^\s*openai_base_url\s*=') {
-                [void]$updatedLines.Add($setting)
-                $found = $true
-            }
+    $hasFinalNewline = $Content.EndsWith([char]10)
+    $lines = [regex]::Split($Content, '\r?\n')
+    $starts = [System.Collections.Generic.List[int]]::new()
+    for ($index = 0; $index -lt $lines.Count; $index++) {
+        if ($lines[$index] -cmatch '^\s{2}- id:\s*\S+\s*$') {
+            $starts.Add($index)
         }
     }
-
-    if (-not $found) {
-        [void]$updatedLines.Add($setting)
+    if ($starts.Count -eq 0) {
+        throw "Gateway 模型配置中没有 models 路由项"
     }
 
-    $updatedConfig = ($updatedLines -join [Environment]::NewLine) + [Environment]::NewLine
-    $existingConfig = [System.IO.File]::ReadAllText($CodexConfigPath)
-    if ($existingConfig -ceq $updatedConfig) {
-        Write-Host "Codex 配置已引用显示模型目录"
-        return $false
+    $blocks = [System.Collections.Generic.List[object]]::new()
+    for ($blockIndex = 0; $blockIndex -lt $starts.Count; $blockIndex++) {
+        $start = $starts[$blockIndex]
+        $end = if ($blockIndex + 1 -lt $starts.Count) {
+            $starts[$blockIndex + 1] - 1
+        } else {
+            $lines.Count - 1
+        }
+        $blockLines = @($lines[$start..$end])
+        $idMatch = [regex]::Match($blockLines[0], '^\s{2}- id:\s*(?<id>\S+)\s*$')
+        if (-not $idMatch.Success) { throw "无法解析 Gateway 模型路由行: $($blockLines[0])" }
+        $familyMatch = [regex]::Match(
+            $idMatch.Groups["id"].Value,
+            '^gpt-(?<version>\d+(?:\.\d+)*)-(?<family>sol|luna)$'
+        )
+        $family = if ($familyMatch.Success) { $familyMatch.Groups["family"].Value } else { $null }
+        $blocks.Add([pscustomobject]@{
+            Id = $idMatch.Groups["id"].Value
+            Family = $family
+            Lines = $blockLines
+            UpdatedLines = $null
+        })
     }
 
-    $configDirectory = Split-Path -Parent $CodexConfigPath
-    $tempPath = "$CodexConfigPath.tmp-$PID"
-    $backupPath = Join-Path $configDirectory "config.toml.bak-model-catalog-$PID"
-    $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+    $latestByFamily = @{
+        sol = ($LatestSlugs | Where-Object { $_ -match '-sol$' } | Select-Object -First 1)
+        luna = ($LatestSlugs | Where-Object { $_ -match '-luna$' } | Select-Object -First 1)
+    }
+    $selectedIndexByFamily = @{}
+    $retiredIds = [System.Collections.Generic.List[string]]::new()
+    foreach ($family in @("sol", "luna")) {
+        $candidates = @(
+            for ($index = 0; $index -lt $blocks.Count; $index++) {
+                if ($blocks[$index].Family -ceq $family) {
+                    [pscustomobject]@{ Index = $index; Block = $blocks[$index] }
+                }
+            }
+        )
+        if ($candidates.Count -eq 0) {
+            throw "Gateway route config has no existing gpt-$family route to migrate"
+        }
+        $matchingLatest = @($candidates | Where-Object { $_.Block.Id -ceq $latestByFamily[$family] })
+        $selected = if ($matchingLatest.Count -gt 0) { $matchingLatest[0] } else { $candidates[0] }
+        $selectedIndexByFamily[$family] = [int]$selected.Index
+        if ($selected.Block.Id -cne $latestByFamily[$family]) {
+            $retiredIds.Add($selected.Block.Id)
+        }
 
+        $updatedLines = [System.Collections.Generic.List[string]]::new()
+        foreach ($line in $selected.Block.Lines) { $updatedLines.Add($line) }
+        $idLine = [regex]::Match($updatedLines[0], '^(?<prefix>\s{2}- id:\s*).+$')
+        if (-not $idLine.Success) { throw "Cannot update gpt-$family route ID" }
+        $updatedLines[0] = $idLine.Groups["prefix"].Value + $latestByFamily[$family]
+
+        $upstreamIndex = -1
+        for ($lineIndex = 0; $lineIndex -lt $updatedLines.Count; $lineIndex++) {
+            if ($updatedLines[$lineIndex] -cmatch '^\s+upstream_model:\s*') {
+                $upstreamIndex = $lineIndex
+                break
+            }
+        }
+        if ($upstreamIndex -lt 0) {
+            throw "Gateway gpt-$family route has no upstream_model field"
+        }
+        $upstreamLine = [regex]::Match(
+            $updatedLines[$upstreamIndex],
+            '^(?<prefix>\s+upstream_model:\s*).+$'
+        )
+        if (-not $upstreamLine.Success) { throw "Cannot update gpt-$family upstream model" }
+        $updatedLines[$upstreamIndex] = $upstreamLine.Groups["prefix"].Value + $latestByFamily[$family]
+
+        $routeText = $updatedLines -join ([string][char]10)
+        if (
+            $routeText -notmatch '(?m)^\s+mode:\s*responses\s*$' -or
+            $routeText -notmatch '(?m)^\s+authorization:\s*chatgpt\s*$' -or
+            $routeText -notmatch '(?m)^\s+api_base:\s*https://chatgpt\.com/backend-api/codex\s*$'
+        ) {
+            throw "Gateway gpt-$family route does not match the ChatGPT Codex Responses contract"
+        }
+        $selected.Block.UpdatedLines = $updatedLines.ToArray()
+
+        foreach ($candidate in $candidates) {
+            if ($candidate.Index -ne $selected.Index) {
+                $retiredIds.Add($candidate.Block.Id)
+            }
+        }
+    }
+
+    $outputLines = [System.Collections.Generic.List[string]]::new()
+    $firstStart = $starts[0]
+    for ($index = 0; $index -lt $firstStart; $index++) { $outputLines.Add($lines[$index]) }
+    for ($index = 0; $index -lt $blocks.Count; $index++) {
+        $block = $blocks[$index]
+        if ($null -eq $block.Family) {
+            foreach ($line in $block.Lines) { $outputLines.Add($line) }
+            continue
+        }
+        if ($selectedIndexByFamily[$block.Family] -ne $index) { continue }
+        foreach ($line in $block.UpdatedLines) { $outputLines.Add($line) }
+    }
+
+    $newContent = $outputLines -join $lineEnding
+    if ($hasFinalNewline -and -not $newContent.EndsWith([char]10)) {
+        $newContent += $lineEnding
+    }
+    $routeIds = [System.Collections.Generic.List[string]]::new()
+    for ($index = 0; $index -lt $blocks.Count; $index++) {
+        $block = $blocks[$index]
+        if ($null -eq $block.Family) {
+            $routeIds.Add($block.Id)
+        }
+        elseif ($selectedIndexByFamily[$block.Family] -eq $index) {
+            $routeIds.Add($latestByFamily[$block.Family])
+        }
+    }
+    [pscustomobject]@{
+        Content = $newContent
+        Changed = $newContent -cne $Content
+        CurrentGptIds = @($blocks | Where-Object { $null -ne $_.Family } | ForEach-Object { $_.Id })
+        LatestIds = @($latestByFamily.sol, $latestByFamily.luna)
+        RetiredIds = $retiredIds.ToArray()
+        RouteIds = $routeIds.ToArray()
+    }
+}
+
+function Write-AtomicText {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Content
+    )
+
+    $directory = Split-Path -Parent $Path
+    $temporaryPath = Join-Path $directory ((Split-Path -Leaf $Path) + ".tmp-$PID")
     try {
-        Copy-Item -LiteralPath $CodexConfigPath -Destination $backupPath -Force
-        [System.IO.File]::WriteAllText($tempPath, $updatedConfig, $utf8NoBom)
-        Move-Item -LiteralPath $tempPath -Destination $CodexConfigPath -Force
-        Remove-Item -LiteralPath $backupPath -Force
-        Write-Host "Codex 配置已引用: $CodexDisplayCatalogPath"
-        return $true
+        [System.IO.File]::WriteAllText($temporaryPath, $Content, [System.Text.UTF8Encoding]::new($false))
+        Move-Item -LiteralPath $temporaryPath -Destination $Path -Force
     }
-    catch {
-        if (Test-Path -LiteralPath $backupPath) {
-            Copy-Item -LiteralPath $backupPath -Destination $CodexConfigPath -Force
-        }
-        Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
-        throw
+    finally {
+        Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -414,7 +654,7 @@ function Get-AllowedModelSlugs {
     )
 
     if ($null -eq $Catalog.models) {
-        throw "Codex 官方模型缓存没有 models 数组"
+        throw "Codex bundled model catalog 没有 models 数组"
     }
 
     $models = [System.Collections.Generic.List[string]]::new()
@@ -427,27 +667,131 @@ function Get-AllowedModelSlugs {
             $Catalog.models | Where-Object { [string]$_.slug -eq $slug }
         ) | Select-Object -First 1
         if ($null -eq $entry) {
-            throw "Codex 官方模型缓存缺少统一模型: $slug"
+            throw "Codex bundled model catalog 缺少最新模型: $slug"
         }
 
         Add-UniqueModel -Models $models -Model $slug
     }
 
     if ($models.Count -ne $AllowedModelSlugs.Count) {
-        throw "Codex 官方模型缓存未包含完整的三模型白名单"
+        throw "Codex bundled model catalog 未包含完整的 sol/luna 模型集合"
     }
     return $models.ToArray()
 }
 
+$gatewayRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$gatewayConfig = Get-Content -LiteralPath $GatewayConfigPath -Raw | ConvertFrom-Json
+if ([string]::IsNullOrWhiteSpace($GatewayModelsPath)) {
+    $GatewayModelsPath = Join-Path $gatewayRoot ([string]$gatewayConfig.models_file)
+}
+else {
+    $GatewayModelsPath = [System.IO.Path]::GetFullPath($GatewayModelsPath)
+}
+$GatewayStartScript = [System.IO.Path]::GetFullPath($GatewayStartScript)
+foreach ($requiredPath in @($GatewayModelsPath, $GatewayStartScript)) {
+    if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
+        throw "Gateway model update path is missing: $requiredPath"
+    }
+}
+
 $catalog = Read-ModelCatalog
+$AllowedModelSlugs = @(Get-LatestOfficialModelSlugs -Catalog $catalog)
+$ManagedModelSlugs = @($AllowedModelSlugs + $SupplementalModelSlugs)
+$models = @(Get-AllowedModelSlugs -Catalog $catalog)
+$currentGatewayContent = [System.IO.File]::ReadAllText($GatewayModelsPath)
+$gatewayPlan = Get-GatewayModelsPlan -Content $currentGatewayContent -LatestSlugs $AllowedModelSlugs
 
 if ($CheckOnly) {
-    $models = @(Get-AllowedModelSlugs -Catalog $catalog)
-    Write-Output "Codex 模型同步预览（统一保留 $($models.Count) 个受控模型）：$($models -join ', ')"
+    if (-not (Test-Path -LiteralPath $CodexDisplayCatalogPath -PathType Leaf)) {
+        throw "Codex 显示模型目录不存在: $CodexDisplayCatalogPath"
+    }
+    $existingDisplayCatalog = Get-Content -Raw -LiteralPath $CodexDisplayCatalogPath | ConvertFrom-Json
+    $displayPreview = @(Get-ManagedDisplayCatalogModels -SourceCatalog $catalog -ExistingCatalog $existingDisplayCatalog)
+    Write-Output "Codex bundled latest models: $($models -join ', ')"
+    Write-Output "Current Gateway GPT routes: $($gatewayPlan.CurrentGptIds -join ', ')"
+    if ($gatewayPlan.RetiredIds.Count -gt 0) {
+        Write-Output "Will retire (not callable after apply): $($gatewayPlan.RetiredIds -join ', ')"
+    }
+    if ($gatewayPlan.Changed) {
+        Write-Output "Will update Gateway routes to: $($gatewayPlan.LatestIds -join ', ')"
+    }
+    else {
+        Write-Output "Gateway GPT routes already match the latest bundled catalog"
+    }
+    Write-Output "Codex display catalog validation passed for $($displayPreview.Count) managed models"
+    Write-Output "Managed Codex model catalog after apply: $($ManagedModelSlugs -join ', ')"
     exit 0
 }
 
-[void](Sync-CodexRuntimeCatalog -Catalog $catalog)
-[void](Sync-CodexDisplayCatalog)
-[void](Ensure-CodexDisplayCatalogConfig)
-Write-Host "客户端模型目录同步完成（$($ManagedModelSlugs.Count) 个受控模型）"
+$trackedPaths = @($CatalogPath, $CodexDisplayCatalogPath, $GatewayModelsPath)
+$originalContents = @{}
+foreach ($path in $trackedPaths) {
+    if (Test-Path -LiteralPath $path -PathType Leaf) {
+        $originalContents[$path] = [System.IO.File]::ReadAllText($path)
+    }
+    else {
+        $originalContents[$path] = $null
+    }
+}
+
+$runtimeCatalog = $catalog | ConvertTo-Json -Depth 100 | ConvertFrom-Json
+$displayCatalog = $catalog | ConvertTo-Json -Depth 100 | ConvertFrom-Json
+try {
+    $runtimeChanged = Sync-CodexRuntimeCatalog -Catalog $runtimeCatalog
+    $displayChanged = Sync-CodexDisplayCatalog -SourceCatalog $displayCatalog
+    if ($gatewayPlan.Changed) {
+        Write-AtomicText -Path $GatewayModelsPath -Content $gatewayPlan.Content
+        $gatewayChanged = $true
+        Write-Host "Gateway routes updated: $($gatewayPlan.LatestIds -join ', ')"
+    }
+    else {
+        $gatewayChanged = $false
+        Write-Host "Gateway GPT routes already match the bundled catalog"
+    }
+}
+catch {
+    foreach ($path in $trackedPaths) {
+        $original = $originalContents[$path]
+        if ($null -eq $original) {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        }
+        elseif ((Test-Path -LiteralPath $path -PathType Leaf) -and
+            [System.IO.File]::ReadAllText($path) -cne $original) {
+            Write-AtomicText -Path $path -Content $original
+        }
+    }
+    throw
+}
+
+$restartGateway = $gatewayChanged
+if (-not $restartGateway) {
+    $agentUri = "http://$($gatewayConfig.listen_host):$($gatewayConfig.ports.agent)/v1/models"
+    try {
+        $liveCatalog = Invoke-RestMethod -Uri $agentUri -TimeoutSec 3
+        $liveIds = @($liveCatalog.data | ForEach-Object { [string]$_.id } | Sort-Object -Unique)
+        $expectedIds = @($gatewayPlan.RouteIds | Sort-Object -Unique)
+        $liveJoined = [string]::Join([char]10, $liveIds)
+        $expectedJoined = [string]::Join([char]10, $expectedIds)
+        $restartGateway = $liveJoined -cne $expectedJoined
+    }
+    catch {
+        $restartGateway = $true
+    }
+}
+
+if ($restartGateway -and -not $NoRestart) {
+    Write-Warning "Restarting Gateway services to apply the model routes; finish active model requests before running this script."
+    & $GatewayStartScript
+    if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+        throw "Gateway restart failed with exit code $LASTEXITCODE; updated model files remain in place"
+    }
+    Write-Host "Gateway restarted; its startup checks validated the protocol catalogs"
+}
+elseif ($restartGateway) {
+    Write-Warning "Gateway files are updated; restart is required before the new route set is active."
+}
+else {
+    Write-Host "Gateway runtime catalog already matches the configured routes"
+}
+
+Write-Host "Model synchronization completed: $($ManagedModelSlugs -join ', ')"
