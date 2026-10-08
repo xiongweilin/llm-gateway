@@ -20,7 +20,7 @@ def test_production_codex_routes_use_chatgpt_auth_and_pinned_chatgpt_backend(mon
     monkeypatch.setenv("CHATGPT_API_BASE", "https://api.openai.com/v1")
     routes = load_model_routes(Path(__file__).parents[1] / "models.yaml")
 
-    for model_id in ("gpt-6-sol", "gpt-6-luna"):
+    for model_id in ("gpt-6.1-sol", "gpt-6-luna"):
         route = routes[model_id]
         assert route.authorization == "chatgpt"
         assert route.api_base == "https://chatgpt.com/backend-api/codex"
