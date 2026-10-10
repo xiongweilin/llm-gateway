@@ -4,19 +4,17 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-A self-owned model-routing core with one stable Agent entry and dedicated
-Responses and Chat Completions protocol services. Provider routing and protocol
-compatibility are implemented in this repository.
+A self-owned model-routing core with a stable Agent entry and dedicated
+Responses, Chat Completions, and Anthropic Messages protocol services. Provider
+routing and protocol compatibility are implemented in this repository.
 
 ## Service topology
 
 ```text
-Agent clients
-     │
-     ▼
-4101  Unified Agent entry
-     ├── Responses ─────────────────────► 4102  Responses service ─┐
-     └── Chat Completions ──────────────► 4103  Chat service ──────┴──► 4100 Core ──► provider API
+Agent clients ──► 4101 Unified Agent entry
+                     ├── Responses ───► 4102 Responses service ─┐
+                     └── Chat ─────────► 4103 Chat service ─────┤
+Anthropic clients ──────────────────────► 4104 Messages service ─┴──► 4100 Core ──► provider API
 ```
 
 - **4100 — Core:** owns route selection, outbound provider requests,
@@ -31,6 +29,8 @@ Agent clients
   SSE events and does not translate Responses to Chat Completions.
 - **4103 — Chat Completions protocol:** preserves Chat request/response and SSE
   streaming semantics while forwarding to Core.
+- **4104 — Anthropic Messages protocol:** forwards `/v1/messages` and
+  `/v1/messages/count_tokens` while preserving JSON and SSE streaming semantics.
 
 All listeners bind to the host and ports declared in `config/gateway.json`.
 The default host is loopback. The port roles are defined there once and are
@@ -39,7 +39,11 @@ consumed by the runtime scripts.
 ## Model routes
 
 `core/models.yaml` is the route source of truth. Each entry declares the public
-model id, protocol mode, provider model id, API base, and authorization source.
+model id, protocol mode, provider model id, API base, and credential environment
+variable name. Anthropic Messages routes inject the provider key as `x-api-key`
+and default the API version to `2023-06-01`. The `sonnet-5.5` provider key is
+read from the `KITOOL_API_KEY` environment variable; its provider-side model
+id is `claude-sonnet-5-5`.
 Credential values are never stored in the route file. `api_base_env` allows
 provider endpoints that explicitly opt in to be overridden without editing
 code. Codex GPT routes pin `https://chatgpt.com/backend-api/codex` and use
@@ -60,7 +64,7 @@ uv sync --project core --locked --group dev
 pwsh -NoProfile -File .\scripts\start-agent-gateway.ps1
 ```
 
-Stop the four local services with:
+Stop the five local services with:
 
 ```powershell
 pwsh -NoProfile -File .\scripts\stop-agent-gateway.ps1

@@ -12,6 +12,7 @@ $Ports = @(
     @{ Port = [int]$GatewayConfig.ports.agent; Label = 'unified Agent entry' },
     @{ Port = [int]$GatewayConfig.ports.responses; Label = 'Responses protocol service' },
     @{ Port = [int]$GatewayConfig.ports.chat; Label = 'Chat Completions service' },
+    @{ Port = [int]$GatewayConfig.ports.messages; Label = 'Anthropic Messages service' },
     @{ Port = [int]$GatewayConfig.ports.core; Label = 'model routing core' }
 )
 
@@ -33,7 +34,7 @@ function Test-OwnedCommand {
     if ([string]::IsNullOrWhiteSpace($CommandLine)) { return $false }
     $RootPattern = [regex]::Escape($Root)
     if ($CommandLine -notmatch "(?i)$RootPattern") { return $false }
-    return $CommandLine -match '(?i)(llm_gateway\.core_server|agent-gateway\.py|responses-proxy\.py|run_server\.py|chat-completions-proxy\.py)'
+    return $CommandLine -match '(?i)(llm_gateway\.core_server|agent-gateway\.py|responses-proxy\.py|run_server\.py|chat-completions-proxy\.py|messages-proxy\.py)'
 }
 
 function Stop-OwnedPort {

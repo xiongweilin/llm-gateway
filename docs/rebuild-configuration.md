@@ -17,11 +17,13 @@
 | 4101 | Unified Agent entry | Stable agent-facing endpoint for model protocols |
 | 4102 | Responses service | Responses-specific protocol handling and compatibility |
 | 4103 | Chat service | Chat Completions protocol forwarding and streaming |
+| 4104 | Anthropic Messages service | `/v1/messages` and `/v1/messages/count_tokens` forwarding |
 
 Agent clients connect to 4101. Responses requests go to 4102 and Chat
-Completions requests go to 4103; both protocol services forward to Core at
-4100. Responses-to-Chat conversion is not performed. The configuration file
-owns the port assignments; scripts do not contain a second port map.
+Completions requests go to 4103; Anthropic Messages clients connect to 4104.
+All three protocol services forward to Core at 4100. Responses-to-Chat
+conversion is not performed. The configuration file owns the port assignments;
+scripts do not contain a second port map.
 
 ## Install and start
 
@@ -33,9 +35,9 @@ pwsh -NoProfile -File .\scripts\start-agent-gateway.ps1
 ```
 
 The launcher resolves paths relative to its own location. It starts Core,
-Chat, Responses, and the Agent entry in dependency order, then checks health
-and model catalogs. It does not restart anything when this document is edited;
-run the launcher explicitly when ready to apply code changes.
+Chat, Responses, Anthropic Messages, and the Agent entry in dependency order,
+then checks health and model catalogs. It does not restart anything when this
+document is edited; run the launcher explicitly when ready to apply code changes.
 
 ## Health and catalogs
 
@@ -43,9 +45,11 @@ run the launcher explicitly when ready to apply code changes.
 - Agent entry health: `http://127.0.0.1:4101/health/liveliness`
 - Responses health: `http://127.0.0.1:4102/health/liveliness`
 - Chat service health: `http://127.0.0.1:4103/health/liveliness`
+- Anthropic Messages health: `http://127.0.0.1:4104/health/liveliness`
 - Unified model catalog: `http://127.0.0.1:4101/v1/models`
 - Responses catalog: `http://127.0.0.1:4102/v1/models`
 - Chat catalog: `http://127.0.0.1:4103/v1/models`
+- Anthropic Messages catalog: `http://127.0.0.1:4104/v1/models`
 
-The unified catalog contains every configured route. The Responses and Chat
-catalogs contain only models configured for their respective protocol.
+The unified catalog contains only Responses and Chat models. Each protocol
+catalog contains only models configured for its protocol.

@@ -25,7 +25,9 @@ MODELS_PATH = "/v1/models"
 PROTOCOL_PATHS = {
     "responses": "/v1/responses",
     "chat": "/v1/chat/completions",
+    "messages": "/v1/messages",
 }
+MESSAGE_COUNT_TOKENS_PATH = "/v1/messages/count_tokens"
 HOP_BY_HOP_HEADERS = {
     "connection",
     "content-length",
@@ -140,8 +142,14 @@ def normalize_opencode_custom_tools(data: dict[str, Any]) -> int:
     return converted
 
 
-def build_upstream_url(api_base: str, request_path: str, query: str = "") -> str:
-    suffix = request_path.removeprefix("/v1")
+def build_upstream_url(
+    api_base: str,
+    request_path: str,
+    query: str = "",
+    *,
+    preserve_versioned_path: bool = False,
+) -> str:
+    suffix = request_path if preserve_versioned_path else request_path.removeprefix("/v1")
     url = f"{api_base.rstrip('/')}{suffix}"
     return f"{url}?{query}" if query else url
 
@@ -175,20 +183,32 @@ def build_upstream_headers(
     allowed_headers = LEGACY_CODEX_UPSTREAM_HEADERS
     if route.compatibility == "opencode-go":
         allowed_headers = allowed_headers | {"x-opencode-session"}
+    if route.mode == "messages":
+        allowed_headers = allowed_headers | {
+            "anthropic-beta",
+            "anthropic-version",
+            "anthropic-workspace-id",
+        }
     headers = {
         key: value
         for key, value in request_headers.items()
         if key.lower() in allowed_headers
     }
     headers["Accept-Encoding"] = "identity"
+    if route.mode == "messages":
+        _setdefault_header(headers, "Content-Type", "application/json")
+        _setdefault_header(headers, "anthropic-version", "2023-06-01")
     if route.api_key_env:
         api_key = env.get(route.api_key_env)
         if not api_key:
             raise RuntimeError(f"provider credential is not configured: {route.api_key_env}")
         for key in tuple(headers):
-            if key.lower() == "authorization":
+            if key.lower() in {"authorization", "x-api-key"}:
                 del headers[key]
-        headers["Authorization"] = f"Bearer {api_key}"
+        if route.mode == "messages":
+            headers["x-api-key"] = api_key
+        else:
+            headers["Authorization"] = f"Bearer {api_key}"
     elif route.authorization == "chatgpt":
         if chatgpt_credentials is None:
             raise RuntimeError("ChatGPT subscription credential was not resolved")
@@ -276,7 +296,12 @@ async def _proxy_response(
             delay = 0.0
             async with session.request(
                 request.method,
-                build_upstream_url(route.api_base, request.path, request.query_string),
+                build_upstream_url(
+                    route.api_base,
+                    request.path,
+                    request.query_string,
+                    preserve_versioned_path=route.mode == "messages",
+                ),
                 data=payload,
                 headers=headers,
                 compress=False,
@@ -338,16 +363,18 @@ async def handle(request: web.Request):
         return web.json_response({"status": "ok", "service": "core"})
     if request.method == "GET" and request.path == MODELS_PATH:
         return web.json_response(model_catalog(routes))
-    if request.method != "POST" or request.path not in {
-        PROTOCOL_PATHS["responses"],
-        PROTOCOL_PATHS["chat"],
+    if request.method != "POST" or request.path not in set(PROTOCOL_PATHS.values()) | {
+        MESSAGE_COUNT_TOKENS_PATH
     }:
         return web.json_response(
             {"error": {"type": "not_found", "message": "path is not served by the core"}},
             status=404,
         )
 
-    expected_mode = "responses" if request.path == PROTOCOL_PATHS["responses"] else "chat"
+    expected_mode = next(
+        (mode for mode, path in PROTOCOL_PATHS.items() if request.path == path),
+        "messages" if request.path == MESSAGE_COUNT_TOKENS_PATH else "",
+    )
     try:
         # aiohttp 会在 handler 运行前解码受支持的 request content encoding。
         body = await request.read()

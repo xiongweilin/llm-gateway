@@ -9,8 +9,8 @@ from pathlib import Path
 import yaml
 
 
-def load_protocol_models(config_path: str | Path) -> tuple[set[str], set[str]]:
-    """Return ``(responses_models, chat_models)`` from the owned model source."""
+def load_protocol_models(config_path: str | Path) -> tuple[set[str], set[str], set[str]]:
+    """Return protocol model sets from the owned model source."""
     path = Path(config_path)
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict) or not isinstance(data.get("models"), list):
@@ -18,6 +18,7 @@ def load_protocol_models(config_path: str | Path) -> tuple[set[str], set[str]]:
 
     responses: set[str] = set()
     chat: set[str] = set()
+    messages: set[str] = set()
     seen: set[str] = set()
     for entry in data["models"]:
         if not isinstance(entry, dict):
@@ -33,20 +34,23 @@ def load_protocol_models(config_path: str | Path) -> tuple[set[str], set[str]]:
             responses.add(model_name)
         elif mode == "chat":
             chat.add(model_name)
+        elif mode == "messages":
+            messages.add(model_name)
         else:
             raise ValueError(f"model route has unsupported mode {mode!r}: {model_name}")
 
-    if responses & chat:
-        overlap = ", ".join(sorted(responses & chat))
-        raise ValueError(f"model appears in both protocol sets: {overlap}")
-    return responses, chat
+    return responses, chat, messages
 
 
 def main() -> int:
     if len(sys.argv) != 2:
         raise SystemExit("usage: protocol_models.py MODEL_CONFIG")
-    responses, chat = load_protocol_models(sys.argv[1])
-    print(json.dumps({"responses": sorted(responses), "chat": sorted(chat)}, ensure_ascii=False))
+    responses, chat, messages = load_protocol_models(sys.argv[1])
+    print(json.dumps({
+        "responses": sorted(responses),
+        "chat": sorted(chat),
+        "messages": sorted(messages),
+    }, ensure_ascii=False))
     return 0
 
 

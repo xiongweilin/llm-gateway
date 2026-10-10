@@ -61,6 +61,7 @@ def test_gateway_configuration_assigns_requested_ports() -> None:
         "agent": 4101,
         "responses": 4102,
         "chat": 4103,
+        "messages": 4104,
     }
 
 

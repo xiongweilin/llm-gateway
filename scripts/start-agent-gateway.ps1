@@ -17,9 +17,10 @@ $CorePort = [int]$GatewayConfig.ports.core
 $AgentPort = [int]$GatewayConfig.ports.agent
 $ResponsesPort = [int]$GatewayConfig.ports.responses
 $ChatPort = [int]$GatewayConfig.ports.chat
-$Ports = @($CorePort, $AgentPort, $ResponsesPort, $ChatPort)
-if ([string]::IsNullOrWhiteSpace($ListenHost) -or @($Ports | Sort-Object -Unique).Count -ne 4) {
-    throw 'gateway host and four distinct service ports must be configured'
+$MessagesPort = [int]$GatewayConfig.ports.messages
+$Ports = @($CorePort, $AgentPort, $ResponsesPort, $ChatPort, $MessagesPort)
+if ([string]::IsNullOrWhiteSpace($ListenHost) -or @($Ports | Sort-Object -Unique).Count -ne 5) {
+    throw 'gateway host and five distinct service ports must be configured'
 }
 
 $CoreDir = Join-Path $Root 'core'
@@ -29,14 +30,16 @@ $ModelsPath = Join-Path $Root ([string]$GatewayConfig.models_file)
 $AgentEntry = Join-Path $Root 'tools\agent-gateway.py'
 $ResponsesEntry = Join-Path $Root 'tools\responses-proxy.py'
 $ChatEntry = Join-Path $Root 'tools\chat-completions-proxy.py'
+$MessagesEntry = Join-Path $Root 'tools\messages-proxy.py'
 $RuntimeDir = Join-Path $CoreDir '.run'
 $CoreUrl = "http://${ListenHost}:$CorePort"
 $AgentUrl = "http://${ListenHost}:$AgentPort"
 $ResponsesUrl = "http://${ListenHost}:$ResponsesPort"
 $ChatUrl = "http://${ListenHost}:$ChatPort"
+$MessagesUrl = "http://${ListenHost}:$MessagesPort"
 $ControlPlaneBackend = [string]$GatewayConfig.control_plane_backend
 
-foreach ($requiredPath in @($ModelsPath, $AgentEntry, $ResponsesEntry, $ChatEntry)) {
+foreach ($requiredPath in @($ModelsPath, $AgentEntry, $ResponsesEntry, $ChatEntry, $MessagesEntry)) {
     if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
         throw "required gateway file is missing: $requiredPath"
     }
@@ -74,7 +77,7 @@ function Test-OwnedCommand {
     if ([string]::IsNullOrWhiteSpace($CommandLine)) { return $false }
     $RootPattern = [regex]::Escape($Root)
     if ($CommandLine -notmatch "(?i)$RootPattern") { return $false }
-    return $CommandLine -match '(?i)(llm_gateway\.core_server|agent-gateway\.py|responses-proxy\.py|run_server\.py|chat-completions-proxy\.py)'
+    return $CommandLine -match '(?i)(llm_gateway\.core_server|agent-gateway\.py|responses-proxy\.py|run_server\.py|chat-completions-proxy\.py|messages-proxy\.py)'
 }
 
 function Stop-OwnedPort {
@@ -149,11 +152,14 @@ $AgentOut = Join-Path $RuntimeDir 'agent.out.log'
 $AgentErr = Join-Path $RuntimeDir 'agent.err.log'
 $ChatOut = Join-Path $RuntimeDir 'chat.out.log'
 $ChatErr = Join-Path $RuntimeDir 'chat.err.log'
+$MessagesOut = Join-Path $RuntimeDir 'messages.out.log'
+$MessagesErr = Join-Path $RuntimeDir 'messages.err.log'
 $ResponsesOut = Join-Path $RuntimeDir 'responses.out.log'
 $ResponsesErr = Join-Path $RuntimeDir 'responses.err.log'
 $CorePid = Join-Path $RuntimeDir 'core.pid'
 $AgentPid = Join-Path $RuntimeDir 'agent.pid'
 $ChatPid = Join-Path $RuntimeDir 'chat.pid'
+$MessagesPid = Join-Path $RuntimeDir 'messages.pid'
 $ResponsesPid = Join-Path $RuntimeDir 'responses.pid'
 
 $ModelSetsJson = & $Python (Join-Path $Root 'tools\protocol_models.py') $ModelsPath | Out-String
@@ -163,12 +169,14 @@ if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($ModelSetsJson)) {
 $ModelSets = $ModelSetsJson | ConvertFrom-Json
 $ExpectedResponses = @($ModelSets.responses | ForEach-Object { [string]$_ })
 $ExpectedChat = @($ModelSets.chat | ForEach-Object { [string]$_ })
+$ExpectedMessages = @($ModelSets.messages | ForEach-Object { [string]$_ })
 $ExpectedUnified = @(@($ExpectedResponses) + @($ExpectedChat) | Sort-Object -Unique)
 
 # 用户运行此脚本时，只替换由当前 checkout 持有的 listener。
 Stop-OwnedPort -Port $AgentPort -Label 'unified Agent entry'
 Stop-OwnedPort -Port $ResponsesPort -Label 'Responses protocol service'
 Stop-OwnedPort -Port $ChatPort -Label 'Chat Completions service'
+Stop-OwnedPort -Port $MessagesPort -Label 'Anthropic Messages service'
 Stop-OwnedPort -Port $CorePort -Label 'model routing core'
 
 $Processes = @()
@@ -204,6 +212,13 @@ try {
     $Processes += $ResponsesProcess
     Wait-HttpReady -Uri "$ResponsesUrl/health/liveliness" -Label 'Responses service'
 
+    $MessagesProcess = Start-Process -FilePath $Python -WorkingDirectory $Root `
+        -ArgumentList @($MessagesEntry, '--host', $ListenHost, '--port', [string]$MessagesPort, '--core-url', $CoreUrl, '--models-config', "`"$ModelsPath`"") `
+        -RedirectStandardOutput $MessagesOut -RedirectStandardError $MessagesErr -WindowStyle Hidden -PassThru
+    $MessagesProcess.Id | Set-Content -LiteralPath $MessagesPid
+    $Processes += $MessagesProcess
+    Wait-HttpReady -Uri "$MessagesUrl/health/liveliness" -Label 'Anthropic Messages service'
+
     $AgentProcess = Start-Process -FilePath $Python -WorkingDirectory $Root `
         -ArgumentList @($AgentEntry, '--host', $ListenHost, '--port', [string]$AgentPort, '--core-url', $CoreUrl, '--responses-url', $ResponsesUrl, '--chat-url', $ChatUrl, '--models-config', "`"$ModelsPath`"") `
         -RedirectStandardOutput $AgentOut -RedirectStandardError $AgentErr -WindowStyle Hidden -PassThru
@@ -218,16 +233,20 @@ try {
         Assert-CatalogMatches -Label 'Responses service' -Actual @(Get-CatalogIds $ResponsesCatalog) -Expected $ExpectedResponses
         $ChatCatalog = Invoke-RestMethod -Uri "$ChatUrl/v1/models" -TimeoutSec 20
         Assert-CatalogMatches -Label 'Chat service' -Actual @(Get-CatalogIds $ChatCatalog) -Expected $ExpectedChat
+        $MessagesCatalog = Invoke-RestMethod -Uri "$MessagesUrl/v1/models" -TimeoutSec 20
+        Assert-CatalogMatches -Label 'Anthropic Messages service' -Actual @(Get-CatalogIds $MessagesCatalog) -Expected $ExpectedMessages
     }
 } catch {
     Show-LogTail -Label 'Core stderr' -Path $CoreErr
     Show-LogTail -Label 'Chat stderr' -Path $ChatErr
     Show-LogTail -Label 'Responses service stderr' -Path $ResponsesErr
+    Show-LogTail -Label 'Anthropic Messages service stderr' -Path $MessagesErr
     Show-LogTail -Label 'Agent entry stderr' -Path $AgentErr
     foreach ($Item in @(
         @{ Port = $AgentPort; Label = 'unified Agent entry' },
         @{ Port = $ResponsesPort; Label = 'Responses protocol service' },
         @{ Port = $ChatPort; Label = 'Chat Completions service' },
+        @{ Port = $MessagesPort; Label = 'Anthropic Messages service' },
         @{ Port = $CorePort; Label = 'model routing core' }
     )) {
         try { Stop-OwnedPort -Port $Item.Port -Label $Item.Label } catch { Write-Warning "cleanup failed for $($Item.Label)" }
@@ -235,4 +254,4 @@ try {
     throw
 }
 
-Write-Host "Gateway ready: Core=$CoreUrl Agent=$AgentUrl Responses=$ResponsesUrl Chat=$ChatUrl"
+Write-Host "Gateway ready: Core=$CoreUrl Agent=$AgentUrl Responses=$ResponsesUrl Chat=$ChatUrl Messages=$MessagesUrl"

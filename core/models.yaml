@@ -21,3 +21,9 @@ models:
     api_base: https://opencode.ai/zen/go/v1
     api_key_env: OPENCODEGO_API_KEY
     compatibility: opencode-go
+
+  - id: sonnet-5.5
+    mode: messages
+    upstream_model: claude-sonnet-5-5
+    api_base: https://kitool.ai
+    api_key_env: KITOOL_API_KEY

@@ -30,6 +30,7 @@ CORE_URL_KEY = web.AppKey("core_url", str)
 RESPONSES_URL_KEY = web.AppKey("responses_url", str)
 CHAT_URL_KEY = web.AppKey("chat_url", str)
 CHAT_MODELS_KEY = web.AppKey("chat_models", set[str])
+AGENT_MODELS_KEY = web.AppKey("agent_models", set[str] | None)
 SESSION_KEY = web.AppKey("session", aiohttp.ClientSession)
 RESPONSES_PATH = "/v1/responses"
 CHAT_PATH = "/v1/chat/completions"
@@ -72,6 +73,21 @@ def forward_headers(headers: Mapping[str, str]) -> dict[str, str]:
     }
     result["Accept-Encoding"] = "identity"
     return result
+
+
+def filter_models_response(body: bytes, allowed_models: set[str]) -> bytes:
+    try:
+        value = json.loads(body)
+    except Exception:
+        return body
+    if not isinstance(value, dict) or not isinstance(value.get("data"), list):
+        return body
+    value["data"] = [
+        item
+        for item in value["data"]
+        if isinstance(item, dict) and item.get("id") in allowed_models
+    ]
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
 
 
 def is_responses_websocket_upgrade(
@@ -141,9 +157,20 @@ async def handle(request: web.Request):
                 if key.lower() not in HOP_BY_HOP_HEADERS
             }
             if "text/event-stream" not in upstream.headers.get("Content-Type", "").lower():
+                response_body = await upstream.read()
+                if (
+                    request.method == "GET"
+                    and request.path == MODELS_PATH
+                    and 200 <= upstream.status < 300
+                    and request.app[AGENT_MODELS_KEY] is not None
+                ):
+                    response_body = filter_models_response(
+                        response_body,
+                        request.app[AGENT_MODELS_KEY] or set(),
+                    )
                 return web.Response(
                     status=upstream.status,
-                    body=await upstream.read(),
+                    body=response_body,
                     headers=response_headers,
                 )
             response = web.StreamResponse(status=upstream.status, headers=response_headers)
@@ -179,12 +206,14 @@ def create_app(
     responses_url: str,
     chat_url: str,
     chat_models: set[str] | None = None,
+    agent_models: set[str] | None = None,
 ):
     app = web.Application(client_max_size=128 * 1024 * 1024)
     app[CORE_URL_KEY] = core_url
     app[RESPONSES_URL_KEY] = responses_url
     app[CHAT_URL_KEY] = chat_url
     app[CHAT_MODELS_KEY] = chat_models or set()
+    app[AGENT_MODELS_KEY] = agent_models
     app.router.add_route("*", "/{tail:.*}", handle)
     app.on_startup.append(_start_session)
     app.on_cleanup.append(_close_session)
@@ -202,9 +231,15 @@ def main() -> None:
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     routes = load_model_routes(args.models_config)
-    _, chat_models = protocol_models(routes)
+    responses_models, chat_models, _ = protocol_models(routes)
     web.run_app(
-        create_app(args.core_url, args.responses_url, args.chat_url, chat_models),
+        create_app(
+            args.core_url,
+            args.responses_url,
+            args.chat_url,
+            chat_models,
+            responses_models | chat_models,
+        ),
         host=args.host,
         port=args.port,
         access_log=None,

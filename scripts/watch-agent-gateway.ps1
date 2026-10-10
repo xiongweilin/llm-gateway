@@ -1,4 +1,4 @@
-# 监控 model core、统一 Agent 入口、Responses service 和 Chat service。
+# 监控 model core、统一 Agent 入口以及各协议服务。
 # 为兼容现有 scheduled task，保留此文件名。
 
 #Requires -Version 7.0
@@ -20,7 +20,8 @@ $ServicePorts = @(
     [int]$GatewayConfig.ports.core,
     [int]$GatewayConfig.ports.agent,
     [int]$GatewayConfig.ports.responses,
-    [int]$GatewayConfig.ports.chat
+    [int]$GatewayConfig.ports.chat,
+    [int]$GatewayConfig.ports.messages
 )
 $PwshExe = Join-Path $PSHOME 'pwsh.exe'
 $LogRoot = Join-Path ([IO.Path]::GetTempPath()) 'llm-gateway-watchdog'

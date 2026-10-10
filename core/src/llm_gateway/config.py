@@ -40,7 +40,7 @@ def load_model_routes(path: str | Path) -> dict[str, ModelRoute]:
             raise ValueError("each model route requires a non-empty id")
         if model_id in routes:
             raise ValueError(f"duplicate model route: {model_id}")
-        if mode not in {"responses", "chat"}:
+        if mode not in {"responses", "chat", "messages"}:
             raise ValueError(f"unsupported protocol mode for {model_id}")
         if not isinstance(upstream_model, str) or not upstream_model.strip():
             raise ValueError(f"model route {model_id} requires upstream_model")
@@ -85,7 +85,8 @@ def _configured_value(entry: dict[str, Any], value_key: str, env_key: str) -> An
     return entry.get(value_key)
 
 
-def protocol_models(routes: dict[str, ModelRoute]) -> tuple[set[str], set[str]]:
+def protocol_models(routes: dict[str, ModelRoute]) -> tuple[set[str], set[str], set[str]]:
     responses = {route.id for route in routes.values() if route.mode == "responses"}
     chat = {route.id for route in routes.values() if route.mode == "chat"}
-    return responses, chat
+    messages = {route.id for route in routes.values() if route.mode == "messages"}
+    return responses, chat, messages
