@@ -94,6 +94,26 @@ def _append_message(messages: list[dict[str, Any]], role: str, content: list[dic
 
 def _tools(payload: dict[str, Any]) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
+
+    def strict_schema(schema: Any) -> Any:
+        if isinstance(schema, list):
+            return [strict_schema(item) for item in schema]
+        if not isinstance(schema, dict):
+            return schema
+        updated = copy.deepcopy(schema)
+        properties = updated.get("properties")
+        if updated.get("type") == "object" and not isinstance(properties, dict):
+            properties = {}
+        if isinstance(properties, dict):
+            updated["properties"] = {
+                name: strict_schema(value) for name, value in properties.items()
+            }
+            updated["additionalProperties"] = False
+        for key in ("items", "allOf", "anyOf", "oneOf"):
+            if key in updated:
+                updated[key] = strict_schema(updated[key])
+        return updated
+
     for tool in payload.get("tools", []):
         if not isinstance(tool, dict):
             continue
@@ -102,13 +122,14 @@ def _tools(payload: dict[str, Any]) -> list[dict[str, Any]]:
             name = tool.get("name")
             schema = tool.get("parameters", tool.get("input_schema"))
             if isinstance(name, str) and name and isinstance(schema, dict):
-                result.append(
-                    {
-                        "name": name,
-                        "description": tool.get("description", ""),
-                        "input_schema": schema,
-                    }
-                )
+                converted = {
+                    "name": name,
+                    "description": tool.get("description", ""),
+                    "input_schema": strict_schema(schema) if tool.get("strict") is True else schema,
+                }
+                if tool.get("strict") is True:
+                    converted["strict"] = True
+                result.append(converted)
         elif tool_type in {"custom", "custom_tool"}:
             name = tool.get("name")
             if isinstance(name, str) and name:
@@ -189,26 +210,45 @@ def responses_request_to_messages(payload: dict[str, Any]) -> dict[str, Any]:
         "messages": messages,
         "stream": True,
     }
-    if system_parts:
-        result["system"] = "\n\n".join(part for part in system_parts if part)
     provider_tools = _tools(payload)
-    if provider_tools:
-        result["tools"] = provider_tools
     choice = payload.get("tool_choice")
-    if choice == "auto":
+    forced_tool_instruction: str | None = None
+    if choice == "none":
+        provider_tools = []
+    elif choice == "auto" or (isinstance(choice, dict) and choice.get("type") == "auto"):
         result["tool_choice"] = {"type": "auto"}
     elif isinstance(choice, str) and choice in {"required", "any"}:
-        result["tool_choice"] = {"type": "any"}
+        result["tool_choice"] = {"type": "auto"}
+        forced_tool_instruction = "Use one of the available tools before answering the user."
     elif isinstance(choice, dict) and choice.get("type") == "function":
         function = choice.get("name")
         if not isinstance(function, str):
             function = (choice.get("function") or {}).get("name") if isinstance(choice.get("function"), dict) else None
         if isinstance(function, str) and function:
-            result["tool_choice"] = {"type": "tool", "name": function}
+            result["tool_choice"] = {"type": "auto"}
+            forced_tool_instruction = f"Use the {function} tool before answering the user."
+    if forced_tool_instruction:
+        system_parts.append(forced_tool_instruction)
+    if system_parts:
+        result["system"] = "\n\n".join(part for part in system_parts if part)
+    if provider_tools:
+        result["tools"] = provider_tools
+    reasoning = payload.get("reasoning")
+    if isinstance(reasoning, dict):
+        effort = reasoning.get("effort")
+        if effort in {"low", "medium", "high", "xhigh", "max"}:
+            result["thinking"] = {"type": "adaptive"}
+            result["output_config"] = {"effort": effort}
+        elif effort in {"minimal", "none"}:
+            result["thinking"] = {"type": "between_tools"}
+            result["output_config"] = {"effort": "low"}
+        elif effort is not None:
+            raise ValueError(f"unsupported Codex reasoning effort for Sonnet 5.5: {effort}")
     for key in ("temperature", "top_p"):
         value = payload.get(key)
         if isinstance(value, (int, float)) and not isinstance(value, bool):
-            result[key] = value
+            if value != 1:
+                raise ValueError(f"Claude Sonnet 5.5 only accepts the default {key}")
     return result
 
 

@@ -35,6 +35,26 @@ $SupplementalModelDefinitions = [ordered]@{
         AutoCompactTokenLimit = 900000
         UseResponsesLite = $false
     }
+    "sonnet-5.5" = [ordered]@{
+        DisplayName = "Claude Sonnet 5.5"
+        Description = "Anthropic Claude Sonnet 5.5 routed through the local LLM Gateway."
+        Priority = 5
+        ContextWindow = 1000000
+        AutoCompactTokenLimit = 900000
+        MaxOutputTokens = 128000
+        DefaultReasoningLevel = "high"
+        SupportedReasoningLevels = @(
+            [ordered]@{ effort = "low"; description = "Lower latency and lighter reasoning" }
+            [ordered]@{ effort = "medium"; description = "Balances latency and reasoning depth" }
+            [ordered]@{ effort = "high"; description = "Deeper reasoning for complex tasks" }
+            [ordered]@{ effort = "xhigh"; description = "Extra-high reasoning depth" }
+            [ordered]@{ effort = "max"; description = "Maximum reasoning depth" }
+        )
+        InputModalities = @("text", "image")
+        SupportsSearchTool = $false
+        SupportsParallelToolCalls = $true
+        UseResponsesLite = $false
+    }
     # --- 以下模型已停用（2026-09-23），恢复时取消注释 ---
     # "opencode-go/muse-spark-1.3-contributor" = [ordered]@{
     #     DisplayName = "Muse Spark 1.3 Contributor (OpenCode Go)"
@@ -184,7 +204,7 @@ function Set-SupplementalCodexModelMetadata {
 
     $definition = $SupplementalModelDefinitions[$Slug]
     if ($null -eq $definition) {
-        throw "没有 OpenCode Go 模型元数据定义: $Slug"
+        throw "没有补充模型元数据定义: $Slug"
     }
 
     Set-ModelProperty -Object $Object -Name "slug" -Value $Slug
@@ -195,6 +215,24 @@ function Set-SupplementalCodexModelMetadata {
     Set-ModelProperty -Object $Object -Name "priority" -Value $definition.Priority
     Set-ModelProperty -Object $Object -Name "context_window" -Value $definition.ContextWindow
     Set-ModelProperty -Object $Object -Name "max_context_window" -Value $definition.ContextWindow
+    if ($null -ne $definition.MaxOutputTokens) {
+        Set-ModelProperty -Object $Object -Name "max_output_tokens" -Value $definition.MaxOutputTokens
+    }
+    if ($null -ne $definition.DefaultReasoningLevel) {
+        Set-ModelProperty -Object $Object -Name "default_reasoning_level" -Value $definition.DefaultReasoningLevel
+    }
+    if ($null -ne $definition.SupportedReasoningLevels) {
+        Set-ModelProperty -Object $Object -Name "supported_reasoning_levels" -Value @($definition.SupportedReasoningLevels)
+    }
+    if ($null -ne $definition.InputModalities) {
+        Set-ModelProperty -Object $Object -Name "input_modalities" -Value @($definition.InputModalities)
+    }
+    if ($null -ne $definition.SupportsSearchTool) {
+        Set-ModelProperty -Object $Object -Name "supports_search_tool" -Value $definition.SupportsSearchTool
+    }
+    if ($null -ne $definition.SupportsParallelToolCalls) {
+        Set-ModelProperty -Object $Object -Name "supports_parallel_tool_calls" -Value $definition.SupportsParallelToolCalls
+    }
     if ($null -ne $definition.AutoCompactTokenLimit) {
         Set-ModelProperty -Object $Object -Name "auto_compact_token_limit" -Value $definition.AutoCompactTokenLimit
     }
@@ -261,7 +299,7 @@ function Get-ManagedCatalogModels {
                 $existingModels | Where-Object { [string]$_.slug -eq $templateSlug }
             ) | Select-Object -First 1
             if ($null -eq $template) {
-                throw "无法为 OpenCode Go 模型找到 Codex 元数据模板: $supplementalSlug"
+                throw "无法为补充模型找到 Codex 元数据模板: $supplementalSlug"
             }
             $supplemental = New-SupplementalCodexModel -TemplateModel $template -Slug $supplementalSlug
         }
@@ -392,7 +430,7 @@ function Get-ManagedDisplayCatalogModels {
                 $updatedModels | Where-Object { [string]$_.slug -ceq $templateSlug }
             ) | Select-Object -First 1
             if ($null -eq $template) {
-                throw "无法为 OpenCode Go 模型找到 Codex 显示目录模板: $supplementalSlug"
+                throw "无法为补充模型找到 Codex 显示目录模板: $supplementalSlug"
             }
             $supplemental = New-SupplementalCodexModel -TemplateModel $template -Slug $supplementalSlug
         }
