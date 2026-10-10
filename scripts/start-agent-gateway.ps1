@@ -170,7 +170,8 @@ $ModelSets = $ModelSetsJson | ConvertFrom-Json
 $ExpectedResponses = @($ModelSets.responses | ForEach-Object { [string]$_ })
 $ExpectedChat = @($ModelSets.chat | ForEach-Object { [string]$_ })
 $ExpectedMessages = @($ModelSets.messages | ForEach-Object { [string]$_ })
-$ExpectedUnified = @(@($ExpectedResponses) + @($ExpectedChat) | Sort-Object -Unique)
+$ExpectedCodexResponses = @($ModelSets.codex_responses | ForEach-Object { [string]$_ })
+$ExpectedUnified = @(@($ExpectedCodexResponses) + @($ExpectedChat) | Sort-Object -Unique)
 
 # 用户运行此脚本时，只替换由当前 checkout 持有的 listener。
 Stop-OwnedPort -Port $AgentPort -Label 'unified Agent entry'
@@ -220,7 +221,7 @@ try {
     Wait-HttpReady -Uri "$MessagesUrl/health/liveliness" -Label 'Anthropic Messages service'
 
     $AgentProcess = Start-Process -FilePath $Python -WorkingDirectory $Root `
-        -ArgumentList @($AgentEntry, '--host', $ListenHost, '--port', [string]$AgentPort, '--core-url', $CoreUrl, '--responses-url', $ResponsesUrl, '--chat-url', $ChatUrl, '--models-config', "`"$ModelsPath`"") `
+        -ArgumentList @($AgentEntry, '--host', $ListenHost, '--port', [string]$AgentPort, '--core-url', $CoreUrl, '--responses-url', $ResponsesUrl, '--chat-url', $ChatUrl, '--messages-url', $MessagesUrl, '--models-config', "`"$ModelsPath`"") `
         -RedirectStandardOutput $AgentOut -RedirectStandardError $AgentErr -WindowStyle Hidden -PassThru
     $AgentProcess.Id | Set-Content -LiteralPath $AgentPid
     $Processes += $AgentProcess

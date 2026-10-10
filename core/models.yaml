@@ -27,3 +27,4 @@ models:
     upstream_model: claude-sonnet-5-5
     api_base: https://kitool.ai
     api_key_env: KITOOL_API_KEY
+    codex_responses: true

@@ -30,6 +30,7 @@ def test_production_codex_routes_use_chatgpt_auth_and_pinned_chatgpt_backend(mon
     assert messages_route.upstream_model == "claude-sonnet-5-5"
     assert messages_route.api_base == "https://kitool.ai"
     assert messages_route.api_key_env == "KITOOL_API_KEY"
+    assert messages_route.codex_responses is True
 
 
 def test_core_forwards_responses_to_the_configured_provider(monkeypatch) -> None:
@@ -321,15 +322,17 @@ models:
     mode: messages
     upstream_model: remote-messages-model
     api_base: https://messages.example
+    codex_responses: true
 """.lstrip(),
         encoding="utf-8",
     )
     monkeypatch.setenv("TEST_PROVIDER_BASE", "https://override.example/v1")
 
     routes = load_model_routes(config)
-    responses, chat, messages = protocol_models(routes)
+    responses, chat, messages, codex_responses = protocol_models(routes)
     assert responses == {"response-model"}
     assert chat == {"chat-model"}
     assert messages == {"messages-model"}
+    assert codex_responses == {"response-model", "messages-model"}
     assert routes["response-model"].api_base == "https://override.example/v1"
     assert routes["response-model"].authorization == "client"

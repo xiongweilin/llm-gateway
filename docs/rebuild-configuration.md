@@ -14,16 +14,17 @@
 | Port | Service | Responsibility |
 |---:|---|---|
 | 4100 | Core | Provider route selection and direct outbound model requests |
-| 4101 | Unified Agent entry | Stable agent-facing endpoint for model protocols |
+| 4101 | Unified Agent entry | Shared protocol ingress, dispatch, and adaptation for Codex, agents, and Anthropic clients |
 | 4102 | Responses service | Responses-specific protocol handling and compatibility |
 | 4103 | Chat service | Chat Completions protocol forwarding and streaming |
 | 4104 | Anthropic Messages service | `/v1/messages` and `/v1/messages/count_tokens` forwarding |
 
-Agent clients connect to 4101. Responses requests go to 4102 and Chat
-Completions requests go to 4103; Anthropic Messages clients connect to 4104.
-All three protocol services forward to Core at 4100. Responses-to-Chat
-conversion is not performed. The configuration file owns the port assignments;
-scripts do not contain a second port map.
+Codex, agent, and Anthropic clients connect to 4101. Native Responses requests
+go to 4102, Chat Completions requests go to 4103, and Anthropic Messages
+requests go to 4104; all three protocol services forward to Core at 4100. For
+models marked `codex_responses: true`, 4101 converts Codex Responses requests
+to Anthropic Messages and sends them to 4104. The configuration file owns the
+port assignments; scripts do not contain a second port map.
 
 ## Install and start
 
@@ -51,5 +52,6 @@ document is edited; run the launcher explicitly when ready to apply code changes
 - Chat catalog: `http://127.0.0.1:4103/v1/models`
 - Anthropic Messages catalog: `http://127.0.0.1:4104/v1/models`
 
-The unified catalog contains only Responses and Chat models. Each protocol
-catalog contains only models configured for its protocol.
+The 4101 catalog contains native Responses, Chat, and Messages models marked
+Codex-compatible. The 4102, 4103, and 4104 catalogs contain models configured
+for their respective protocols.

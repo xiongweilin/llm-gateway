@@ -11,19 +11,21 @@ routing and protocol compatibility are implemented in this repository.
 ## Service topology
 
 ```text
-Agent clients ──► 4101 Unified Agent entry
-                     ├── Responses ───► 4102 Responses service ─┐
-                     └── Chat ─────────► 4103 Chat service ─────┤
-Anthropic clients ──────────────────────► 4104 Messages service ─┴──► 4100 Core ──► provider API
+Codex, Agent, and Anthropic clients ──► 4101 Unified Agent entry
+                                           ├── `/v1/responses` ───────► 4102 Responses service ─┐
+                                           ├── `/v1/chat/completions` ► 4103 Chat service ───────┤
+                                           └── `/v1/messages` ────────► 4104 Messages service ───┴──► 4100 Core ──► provider API
+
+For `sonnet-5.5`, 4101 converts Codex Responses requests into Anthropic Messages requests and forwards them to 4104.
 ```
 
 - **4100 — Core:** owns route selection, outbound provider requests,
   rate-limit retries, model catalog, health, and provider authentication.
   Codex/ChatGPT subscription routes use the gateway-owned ChatGPT OAuth store;
   other providers use their configured credential source.
-- **4101 — Unified Agent entry:** the single local endpoint for agent clients;
-  dispatches Responses and Chat requests to their protocol services and exposes
-  the combined model catalog.
+- **4101 — Unified Agent entry:** the single local endpoint for Codex, Agent,
+  and Anthropic clients; dispatches all three protocols and converts Codex
+  Responses requests for models marked `codex_responses`.
 - **4102 — Responses protocol:** owns Responses-only compatibility, streaming,
   and compaction before forwarding to Core. It immediately forwards streamed
   SSE events and does not translate Responses to Chat Completions.
@@ -40,7 +42,8 @@ consumed by the runtime scripts.
 
 `core/models.yaml` is the route source of truth. Each entry declares the public
 model id, protocol mode, provider model id, API base, and credential environment
-variable name. Anthropic Messages routes inject the provider key as `x-api-key`
+variable name. `codex_responses: true` enables the 4101 Responses-to-Messages
+adapter for a Messages model. Anthropic Messages routes inject the provider key as `x-api-key`
 and default the API version to `2023-06-01`. The `sonnet-5.5` provider key is
 read from the `KITOOL_API_KEY` environment variable; its provider-side model
 id is `claude-sonnet-5-5`.

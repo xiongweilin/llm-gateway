@@ -21,19 +21,27 @@ from aiohttp import web
 CORE_SRC = Path(__file__).resolve().parents[1] / "core" / "src"
 if str(CORE_SRC) not in sys.path:
     sys.path.insert(0, str(CORE_SRC))
+TOOLS_DIR = Path(__file__).resolve().parent
+if str(TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(TOOLS_DIR))
 
 from llm_gateway.config import load_model_routes, protocol_models
+from responses_messages_compat import handle_responses_as_messages
 
 
 log = logging.getLogger("agent-gateway")
 CORE_URL_KEY = web.AppKey("core_url", str)
 RESPONSES_URL_KEY = web.AppKey("responses_url", str)
 CHAT_URL_KEY = web.AppKey("chat_url", str)
+MESSAGES_URL_KEY = web.AppKey("messages_url", str | None)
 CHAT_MODELS_KEY = web.AppKey("chat_models", set[str])
 AGENT_MODELS_KEY = web.AppKey("agent_models", set[str] | None)
+CODEX_MESSAGES_MODELS_KEY = web.AppKey("codex_messages_models", set[str])
 SESSION_KEY = web.AppKey("session", aiohttp.ClientSession)
 RESPONSES_PATH = "/v1/responses"
 CHAT_PATH = "/v1/chat/completions"
+MESSAGES_PATH = "/v1/messages"
+MESSAGES_COUNT_TOKENS_PATH = "/v1/messages/count_tokens"
 MODELS_PATH = "/v1/models"
 HEALTH_PATH = "/health/liveliness"
 CONTROL_PLANE_PREFIX = "/v1/alpha"
@@ -50,9 +58,17 @@ def is_control_plane_path(path: str) -> bool:
     return path == CONTROL_PLANE_PREFIX or path.startswith(f"{CONTROL_PLANE_PREFIX}/")
 
 
-def select_backend(path: str, core_url: str, responses_url: str, chat_url: str) -> str | None:
+def select_backend(
+    path: str,
+    core_url: str,
+    responses_url: str,
+    chat_url: str,
+    messages_url: str | None = None,
+) -> str | None:
     if path == CHAT_PATH:
         return chat_url
+    if path in {MESSAGES_PATH, MESSAGES_COUNT_TOKENS_PATH}:
+        return messages_url
     if path == MODELS_PATH or path == HEALTH_PATH:
         return core_url
     if path == RESPONSES_PATH or is_control_plane_path(path):
@@ -114,14 +130,35 @@ async def handle(request: web.Request):
     core_url = request.app[CORE_URL_KEY]
     responses_url = request.app[RESPONSES_URL_KEY]
     chat_url = request.app[CHAT_URL_KEY]
-    backend = select_backend(request.path, core_url, responses_url, chat_url)
+    messages_url = request.app[MESSAGES_URL_KEY]
+    backend = select_backend(request.path, core_url, responses_url, chat_url, messages_url)
     if backend is None or request.method not in {"GET", "POST"}:
         return web.json_response(
             {"error": {"type": "not_found", "message": "path is not served by the agent entry"}},
             status=404,
         )
 
-    if request.method == "POST" and request.path == CHAT_PATH:
+    if request.method == "POST" and request.path == RESPONSES_PATH:
+        body = await request.read()
+        try:
+            body_obj = json.loads(body)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            body_obj = None
+        model = body_obj.get("model") if isinstance(body_obj, dict) else None
+        codex_messages_models = request.app[CODEX_MESSAGES_MODELS_KEY]
+        if isinstance(model, str) and model in codex_messages_models:
+            if messages_url is None:
+                return web.json_response(
+                    {"error": {"type": "server_error", "message": "Anthropic Messages backend is not configured"}},
+                    status=503,
+                )
+            return await handle_responses_as_messages(
+                request,
+                body,
+                messages_url,
+                request.app[SESSION_KEY],
+            )
+    elif request.method == "POST" and request.path == CHAT_PATH:
         try:
             body = await request.read()
             # aiohttp 会在进入此 handler 前解码受支持的 request encoding。
@@ -207,13 +244,17 @@ def create_app(
     chat_url: str,
     chat_models: set[str] | None = None,
     agent_models: set[str] | None = None,
+    messages_url: str | None = None,
+    codex_messages_models: set[str] | None = None,
 ):
     app = web.Application(client_max_size=128 * 1024 * 1024)
     app[CORE_URL_KEY] = core_url
     app[RESPONSES_URL_KEY] = responses_url
     app[CHAT_URL_KEY] = chat_url
+    app[MESSAGES_URL_KEY] = messages_url
     app[CHAT_MODELS_KEY] = chat_models or set()
     app[AGENT_MODELS_KEY] = agent_models
+    app[CODEX_MESSAGES_MODELS_KEY] = codex_messages_models or set()
     app.router.add_route("*", "/{tail:.*}", handle)
     app.on_startup.append(_start_session)
     app.on_cleanup.append(_close_session)
@@ -227,18 +268,21 @@ def main() -> None:
     parser.add_argument("--core-url", required=True)
     parser.add_argument("--responses-url", required=True)
     parser.add_argument("--chat-url", required=True)
+    parser.add_argument("--messages-url", required=True)
     parser.add_argument("--models-config", required=True)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     routes = load_model_routes(args.models_config)
-    responses_models, chat_models, _ = protocol_models(routes)
+    _, chat_models, messages_models, codex_responses_models = protocol_models(routes)
     web.run_app(
         create_app(
             args.core_url,
             args.responses_url,
             args.chat_url,
             chat_models,
-            responses_models | chat_models,
+            codex_responses_models | chat_models,
+            args.messages_url,
+            messages_models & codex_responses_models,
         ),
         host=args.host,
         port=args.port,
