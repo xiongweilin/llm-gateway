@@ -2980,7 +2980,7 @@ async def main() -> None:
     parser.add_argument("--control-plane-backend", required=True)
     parser.add_argument("--models-config", required=True)
     args = parser.parse_args()
-    responses_models, _ = load_protocol_models(args.models_config)
+    responses_models, _, _, _ = load_protocol_models(args.models_config)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     # 桌面端打开会话会发送完整历史（+工具 schema），超过 aiohttp 默认
     # 1MB 请求体上限会返回 413；调大至 128MB。

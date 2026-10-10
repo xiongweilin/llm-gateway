@@ -4,7 +4,8 @@
     "core": 4100,
     "agent": 4101,
     "responses": 4102,
-    "chat": 4103
+    "chat": 4103,
+    "messages": 4104
   },
   "models_file": "core/models.yaml",
   "control_plane_backend": "https://chatgpt.com/backend-api/codex"

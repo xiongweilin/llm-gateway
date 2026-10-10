@@ -152,7 +152,7 @@ async def main() -> None:
     parser.add_argument("--core-url", required=True)
     parser.add_argument("--models-config", required=True)
     args = parser.parse_args()
-    _, chat_models = load_protocol_models(args.models_config)
+    _, chat_models, _, _ = load_protocol_models(args.models_config)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     app = aiohttp.web.Application(client_max_size=128 * 1024 * 1024)
     session = aiohttp.ClientSession(

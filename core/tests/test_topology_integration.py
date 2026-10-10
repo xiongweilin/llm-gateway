@@ -57,6 +57,14 @@ def test_agent_routes_responses_and_chat_through_their_protocol_services(
             api_base=provider.api_base,
             api_key_env="FAKE_PROVIDER_API_KEY",
         ),
+        "messages-model": ModelRoute(
+            id="messages-model",
+            mode="messages",
+            upstream_model="upstream-messages-model",
+            api_base=provider.base_url,
+            api_key_env="FAKE_PROVIDER_API_KEY",
+            codex_responses=True,
+        ),
     }
 
     async def exercise() -> None:
@@ -96,6 +104,9 @@ def test_agent_routes_responses_and_chat_through_their_protocol_services(
                             responses_url,
                             chat_url,
                             {"chat-model"},
+                            {"responses-model", "chat-model", "messages-model"},
+                            core_url,
+                            {"messages-model"},
                         )
                         async with TestClient(TestServer(agent_app)) as agent_client:
                             native = await agent_client.post(
@@ -151,6 +162,7 @@ def test_agent_routes_responses_and_chat_through_their_protocol_services(
                             assert {item["id"] for item in (await agent_models.json())["data"]} == {
                                 "responses-model",
                                 "chat-model",
+                                "messages-model",
                             }
 
                         response_models = await response_client.get("/v1/models")

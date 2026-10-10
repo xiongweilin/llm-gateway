@@ -21,6 +21,9 @@ def test_agent_entry_routes_each_role_to_the_configured_service() -> None:
     assert gateway.select_backend("/v1/models", core, responses, chat) == core
     assert gateway.select_backend("/health/liveliness", core, responses, chat) == core
     assert gateway.select_backend("/v1/responses", core, responses, chat) == responses
+    messages = "http://127.0.0.1:port-messages"
+    assert gateway.select_backend("/v1/messages", core, responses, chat, messages) == messages
+    assert gateway.select_backend("/v1/messages/count_tokens", core, responses, chat, messages) == messages
     assert gateway.select_backend("/v1/alpha/search", core, responses, chat) == responses
     assert gateway.select_backend("/v1/alpha2/search", core, responses, chat) is None
     assert gateway.select_backend("/unsupported", core, responses, chat) is None
@@ -61,6 +64,7 @@ def test_gateway_configuration_assigns_requested_ports() -> None:
         "agent": 4101,
         "responses": 4102,
         "chat": 4103,
+        "messages": 4104,
     }
 
 

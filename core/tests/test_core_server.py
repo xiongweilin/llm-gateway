@@ -25,6 +25,13 @@ def test_production_codex_routes_use_chatgpt_auth_and_pinned_chatgpt_backend(mon
         assert route.authorization == "chatgpt"
         assert route.api_base == "https://chatgpt.com/backend-api/codex"
 
+    messages_route = routes["sonnet-5.5"]
+    assert messages_route.mode == "messages"
+    assert messages_route.upstream_model == "claude-sonnet-5-5"
+    assert messages_route.api_base == "https://kitool.ai"
+    assert messages_route.api_key_env == "KITOOL_API_KEY"
+    assert messages_route.codex_responses is True
+
 
 def test_core_forwards_responses_to_the_configured_provider(monkeypatch) -> None:
     provider = FakeProviderServer().start()
@@ -196,6 +203,37 @@ def test_opencode_route_preserves_its_gateway_session_header_only() -> None:
     }
 
 
+def test_anthropic_route_injects_provider_key_and_version_headers() -> None:
+    route = ModelRoute(
+        id="messages-model",
+        mode="messages",
+        upstream_model="provider-model",
+        api_base="https://provider.example",
+        api_key_env="ANTHROPIC_TEST_KEY",
+    )
+
+    actual = build_upstream_headers(
+        {
+            "Authorization": "Bearer client-token",
+            "x-api-key": "client-key",
+            "anthropic-version": "2023-06-01",
+            "anthropic-beta": "test-feature",
+            "Content-Type": "application/json",
+            "x-unrelated-header": "do-not-forward",
+        },
+        route,
+        environ={"ANTHROPIC_TEST_KEY": "synthetic-provider-token"},
+    )
+
+    assert actual == {
+        "x-api-key": "synthetic-provider-token",
+        "anthropic-version": "2023-06-01",
+        "anthropic-beta": "test-feature",
+        "Content-Type": "application/json",
+        "Accept-Encoding": "identity",
+    }
+
+
 def test_core_rejects_a_model_on_the_wrong_protocol() -> None:
     routes = {
         "responses-only": ModelRoute(
@@ -280,14 +318,21 @@ models:
     mode: chat
     upstream_model: remote-chat-model
     api_base: https://chat.example/v1
+  - id: messages-model
+    mode: messages
+    upstream_model: remote-messages-model
+    api_base: https://messages.example
+    codex_responses: true
 """.lstrip(),
         encoding="utf-8",
     )
     monkeypatch.setenv("TEST_PROVIDER_BASE", "https://override.example/v1")
 
     routes = load_model_routes(config)
-    responses, chat = protocol_models(routes)
+    responses, chat, messages, codex_responses = protocol_models(routes)
     assert responses == {"response-model"}
     assert chat == {"chat-model"}
+    assert messages == {"messages-model"}
+    assert codex_responses == {"response-model", "messages-model"}
     assert routes["response-model"].api_base == "https://override.example/v1"
     assert routes["response-model"].authorization == "client"

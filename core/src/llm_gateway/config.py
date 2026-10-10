@@ -18,6 +18,7 @@ class ModelRoute:
     api_key_env: str | None = None
     authorization: str = "client"
     compatibility: str | None = None
+    codex_responses: bool = False
 
 
 def load_model_routes(path: str | Path) -> dict[str, ModelRoute]:
@@ -40,7 +41,7 @@ def load_model_routes(path: str | Path) -> dict[str, ModelRoute]:
             raise ValueError("each model route requires a non-empty id")
         if model_id in routes:
             raise ValueError(f"duplicate model route: {model_id}")
-        if mode not in {"responses", "chat"}:
+        if mode not in {"responses", "chat", "messages"}:
             raise ValueError(f"unsupported protocol mode for {model_id}")
         if not isinstance(upstream_model, str) or not upstream_model.strip():
             raise ValueError(f"model route {model_id} requires upstream_model")
@@ -50,6 +51,7 @@ def load_model_routes(path: str | Path) -> dict[str, ModelRoute]:
         api_key_env = entry.get("api_key_env")
         authorization = entry.get("authorization", "client")
         compatibility = entry.get("compatibility")
+        codex_responses = entry.get("codex_responses", False)
         if api_key_env is not None and (not isinstance(api_key_env, str) or not api_key_env):
             raise ValueError(f"invalid api_key_env for {model_id}")
         if authorization not in {"client", "none", "chatgpt"}:
@@ -63,6 +65,10 @@ def load_model_routes(path: str | Path) -> dict[str, ModelRoute]:
             )
         if compatibility not in {None, "opencode-go"}:
             raise ValueError(f"unsupported compatibility profile for {model_id}")
+        if not isinstance(codex_responses, bool):
+            raise ValueError(f"invalid codex_responses flag for {model_id}")
+        if codex_responses and mode != "messages":
+            raise ValueError(f"Codex Responses compatibility requires messages mode for {model_id}")
 
         routes[model_id] = ModelRoute(
             id=model_id,
@@ -72,6 +78,7 @@ def load_model_routes(path: str | Path) -> dict[str, ModelRoute]:
             api_key_env=api_key_env,
             authorization=authorization,
             compatibility=compatibility,
+            codex_responses=codex_responses,
         )
     return routes
 
@@ -85,7 +92,15 @@ def _configured_value(entry: dict[str, Any], value_key: str, env_key: str) -> An
     return entry.get(value_key)
 
 
-def protocol_models(routes: dict[str, ModelRoute]) -> tuple[set[str], set[str]]:
+def protocol_models(
+    routes: dict[str, ModelRoute],
+) -> tuple[set[str], set[str], set[str], set[str]]:
     responses = {route.id for route in routes.values() if route.mode == "responses"}
     chat = {route.id for route in routes.values() if route.mode == "chat"}
-    return responses, chat
+    messages = {route.id for route in routes.values() if route.mode == "messages"}
+    codex_responses = responses | {
+        route.id
+        for route in routes.values()
+        if route.mode == "messages" and route.codex_responses
+    }
+    return responses, chat, messages, codex_responses
