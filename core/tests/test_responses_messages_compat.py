@@ -8,6 +8,7 @@ from pathlib import Path
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
+import pytest
 
 
 ROOT = Path(__file__).parents[2]
@@ -65,6 +66,50 @@ def test_responses_request_conversion_preserves_replayed_tool_turns() -> None:
     ]
     assert result["tools"][0]["input_schema"]["properties"]["command"]["type"] == "string"
     assert result["tool_choice"] == {"type": "auto"}
+
+
+def test_responses_effort_and_forced_tools_map_to_sonnet_supported_options() -> None:
+    result = responses_request_to_messages(
+        {
+            "model": "sonnet-5.5",
+            "input": "Run the requested tool.",
+            "max_output_tokens": 80,
+            "reasoning": {"effort": "max"},
+            "tool_choice": "required",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "exec",
+                    "description": "Run a command",
+                    "strict": True,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"command": {"type": "string"}},
+                        "required": ["command"],
+                    },
+                }
+            ],
+        }
+    )
+
+    assert result["thinking"] == {"type": "adaptive"}
+    assert result["output_config"] == {"effort": "max"}
+    assert result["tool_choice"] == {"type": "auto"}
+    assert "Use one of the available tools" in result["system"]
+    assert result["tools"][0]["strict"] is True
+    assert result["tools"][0]["input_schema"]["additionalProperties"] is False
+
+
+def test_responses_rejects_nondefault_sampling_parameters_for_sonnet() -> None:
+    with pytest.raises(ValueError, match="default temperature"):
+        responses_request_to_messages(
+            {
+                "model": "sonnet-5.5",
+                "input": "hello",
+                "max_output_tokens": 8,
+                "temperature": 0.4,
+            }
+        )
 
 
 def test_agent_entry_routes_all_protocols_and_converts_codex_responses() -> None:
