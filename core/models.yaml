@@ -28,3 +28,10 @@ models:
     api_base: https://kitool.ai
     api_key_env: KITOOL_API_KEY
     codex_responses: true
+
+  - id: opus-5.5
+    mode: messages
+    upstream_model: claude-opus-5-5
+    api_base: https://kitool.ai
+    api_key_env: KITOOL_API_KEY
+    codex_responses: true

@@ -23,9 +23,19 @@ $ErrorActionPreference = "Stop"
 # Model IDs are discovered from the installed Codex bundled catalog at run time.
 $AllowedModelSlugs = @()
 $OfficialModelContextWindowOverrides = @{
-    # Retained only for the exact model this historical override names.
-    "gpt-6-sol" = 1050000
+    # Keep the requested Codex context size across future model version updates.
+    "sol" = 1050000
+    "luna" = 1050000
 }
+
+function Get-OfficialModelContextWindowOverride {
+    param([Parameter(Mandatory)][string]$Slug)
+
+    $match = [regex]::Match($Slug, '^gpt-\d+(?:\.\d+)*-(?<family>sol|luna)$')
+    if (-not $match.Success) { return $null }
+    return $OfficialModelContextWindowOverrides[$match.Groups["family"].Value]
+}
+
 $SupplementalModelDefinitions = [ordered]@{
     "opencode-go/deepseek-flash" = [ordered]@{
         DisplayName = "DeepSeek Flash (OpenCode Go)"
@@ -43,6 +53,26 @@ $SupplementalModelDefinitions = [ordered]@{
         AutoCompactTokenLimit = 900000
         MaxOutputTokens = 128000
         DefaultReasoningLevel = "high"
+        SupportedReasoningLevels = @(
+            [ordered]@{ effort = "low"; description = "Lower latency and lighter reasoning" }
+            [ordered]@{ effort = "medium"; description = "Balances latency and reasoning depth" }
+            [ordered]@{ effort = "high"; description = "Deeper reasoning for complex tasks" }
+            [ordered]@{ effort = "xhigh"; description = "Extra-high reasoning depth" }
+            [ordered]@{ effort = "max"; description = "Maximum reasoning depth" }
+        )
+        InputModalities = @("text", "image")
+        SupportsSearchTool = $false
+        SupportsParallelToolCalls = $true
+        UseResponsesLite = $false
+    }
+    "opus-5.5" = [ordered]@{
+        DisplayName = "Claude Opus 5.5"
+        Description = "Anthropic Claude Opus 5.5 routed through the local LLM Gateway."
+        Priority = 5
+        ContextWindow = 1000000
+        AutoCompactTokenLimit = 900000
+        MaxOutputTokens = 128000
+        DefaultReasoningLevel = "medium"
         SupportedReasoningLevels = @(
             [ordered]@{ effort = "low"; description = "Lower latency and lighter reasoning" }
             [ordered]@{ effort = "medium"; description = "Balances latency and reasoning depth" }
@@ -278,7 +308,7 @@ function Get-ManagedCatalogModels {
         }
 
         Set-ModelProperty -Object $existing -Name "visibility" -Value "list"
-        $contextWindowOverride = $OfficialModelContextWindowOverrides[$slug]
+        $contextWindowOverride = Get-OfficialModelContextWindowOverride -Slug $slug
         if ($null -ne $contextWindowOverride) {
             Set-ModelProperty -Object $existing -Name "context_window" -Value $contextWindowOverride
             Set-ModelProperty -Object $existing -Name "max_context_window" -Value $contextWindowOverride
@@ -407,7 +437,7 @@ function Get-ManagedDisplayCatalogModels {
         Set-ModelProperty -Object $displayModel -Name "slug" -Value $slug
         Set-ModelProperty -Object $displayModel -Name "visibility" -Value "list"
         Set-ModelProperty -Object $displayModel -Name "supported_in_api" -Value $true
-        $contextWindowOverride = $OfficialModelContextWindowOverrides[$slug]
+        $contextWindowOverride = Get-OfficialModelContextWindowOverride -Slug $slug
         if ($null -ne $contextWindowOverride) {
             Set-ModelProperty -Object $displayModel -Name "context_window" -Value $contextWindowOverride
             Set-ModelProperty -Object $displayModel -Name "max_context_window" -Value $contextWindowOverride
