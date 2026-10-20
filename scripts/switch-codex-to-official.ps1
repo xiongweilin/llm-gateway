@@ -72,7 +72,7 @@ $pwshCommand = Get-Command pwsh -ErrorAction SilentlyContinue
 $Pwsh = if ($null -ne $pwshCommand) { $pwshCommand.Source } else { Join-Path $PSHOME "pwsh.exe" }
 
 try {
-    # Preflight: all targets are exact and the existing configuration is recoverable.
+    # 预检：所有目标都精确，现有配置可恢复。
     if (-not (Test-Path -LiteralPath $CodexConfig -PathType Leaf)) {
         throw "Codex 配置不存在: $CodexConfig"
     }
@@ -92,8 +92,8 @@ try {
         Write-Host "未找到网关登录自启动任务，继续停止现有进程"
     }
 
-    # This is the intentionally disruptive step. It is kept in this script so
-    # the current Codex session is not interrupted by the agent itself.
+    # 这是有意为之的中断步骤。把它保留在本脚本中，
+    # 避免当前 Codex 会话被 agent 自身打断。
     Invoke-PwshScript -Path $StopScript
 
     $deadline = (Get-Date).AddSeconds(15)
@@ -120,8 +120,8 @@ try {
     Write-Host "Codex 配置已备份: $BackupPath"
 
     $before = [System.IO.File]::ReadAllText($CodexConfig)
-    # Remove only gateway-owned routing settings. Comments and all unrelated
-    # official Codex settings remain unchanged.
+    # 只移除 Gateway 管理的路由设置。注释和所有无关的
+    # 官方 Codex 设置保持不变。
     $after = [regex]::Replace(
         $before,
         '(?m)^[ \t]*openai_base_url[ \t]*=[^\r\n]*(?:\r\n|\n|$)',
