@@ -19,6 +19,11 @@ pm run build\ as per repo).
 - Small, focused commits; short imperative subject (e.g., "Add health check").
 - Do not commit secrets, \.env\ values, or PII. Use placeholders.
 
+## Language Policy
+- Public documents are paired: English canonical `*.md` and Chinese `*.zh-CN.md`. `LICENSE`, third-party content, and generated content are exempt.
+- First-party full-line code comments use Chinese; inline comments, docstrings, and API documentation stay in their existing language.
+- Run `python scripts/check_doc_pairs.py` before opening a PR; CI runs the same check.
+
 ## Local Validation
 If \.github/scripts/validate_structure.py\ exists, run it locally.
 

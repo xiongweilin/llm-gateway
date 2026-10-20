@@ -20,10 +20,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# Model IDs are discovered from the installed Codex bundled catalog at run time.
+# 模型 ID 在运行时从已安装的 Codex 内置 catalog 中发现。
 $AllowedModelSlugs = @()
 $OfficialModelContextWindowOverrides = @{
-    # Keep the requested Codex context size across future model version updates.
+    # 在未来模型版本更新时保留请求的 Codex 上下文大小。
     "sol" = 1050000
     "luna" = 1050000
 }

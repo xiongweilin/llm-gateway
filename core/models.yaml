@@ -1,6 +1,6 @@
-# Gateway-owned model routes. Credential sources are external to this file:
-# ChatGPT OAuth uses ~/.config/llm/chatgpt/auth.json; other provider secrets
-# use their configured environment variables.
+# Gateway 管理的模型路由。凭据来源在本文件之外：
+# ChatGPT OAuth 使用 ~/.config/llm/chatgpt/auth.json；其他 provider secret
+# 使用各自配置的环境变量。
 models:
   - id: gpt-6.1-sol
     mode: responses
