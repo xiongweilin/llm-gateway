@@ -76,9 +76,32 @@ def _protect_windows_file_identity(path: str, file_id: int) -> None:
         raise PermissionError("could not protect OAuth credential ACL")
 
 
+def _reject_linked_components(path: Path) -> None:
+    """Reject symlinks and Windows junctions in the file or its ancestors.
+
+    Inspect the *lexical* path, not Path.resolve(): resolve() would erase
+    evidence of a symlink or junction before validation.
+    """
+    if ".." in path.parts:
+        raise PermissionError("OAuth credential path must not contain '..'")
+    absolute = path.absolute()  # Absolute, but does not dereference links.
+    for component in (absolute, *absolute.parents):
+        try:
+            info = component.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(info.st_mode) or (
+            os.name == "nt"
+            and bool(
+                getattr(info, "st_file_attributes", 0)
+                & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+            )
+        ):
+            raise PermissionError("OAuth credential path must not use symlinks or junctions")
+
+
 def _protect(path: Path, mode: int, *, directory: bool) -> None:
-    if path.is_symlink():
-        raise PermissionError("OAuth credential path must not be a symlink")
+    _reject_linked_components(path)
     info = path.stat()
     if directory and not stat.S_ISDIR(info.st_mode):
         raise PermissionError("OAuth credential directory is not a directory")
@@ -100,10 +123,10 @@ def protect_existing_auth_file(path: Path) -> None:
 
 def write_private_auth_file(path: Path, text: str) -> None:
     """Create a protected temporary file, then atomically replace the token."""
+    _reject_linked_components(path)  # Check before mkdir touches a linked parent.
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _reject_linked_components(path)  # Recheck newly created directory tree.
     _protect(path.parent, 0o700, directory=True)
-    if path.is_symlink():
-        raise PermissionError("OAuth credential path must not be a symlink")
     fd, name = tempfile.mkstemp(prefix=f".{path.name}.tmp-", dir=path.parent)
     temporary = Path(name)
     try:
