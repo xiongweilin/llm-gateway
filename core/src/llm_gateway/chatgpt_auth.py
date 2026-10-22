@@ -86,7 +86,8 @@ def _candidate_auth_files(
         or (Path.home() / ".config" / "llm" / "chatgpt")
     ).expanduser()
     token_name = environ.get("CHATGPT_AUTH_FILE") or "auth.json"
-    return [(token_dir / token_name).resolve(strict=False)]
+    # Keep the lexical path for security checks: resolve() hides symlinks and junctions.
+    return [token_dir / token_name]
 
 
 def _read_auth_file(path: Path) -> dict[str, Any] | None:
