@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import logging
+from llm_gateway.secure_logging import install_log_redaction
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -154,6 +155,7 @@ async def main() -> None:
     args = parser.parse_args()
     _, chat_models, _, _ = load_protocol_models(args.models_config)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+    install_log_redaction()
     app = aiohttp.web.Application(client_max_size=128 * 1024 * 1024)
     session = aiohttp.ClientSession(
         connector=aiohttp.TCPConnector(limit=64),

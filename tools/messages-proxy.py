@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import logging
+from llm_gateway.secure_logging import install_log_redaction
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -166,6 +167,7 @@ async def main() -> None:
     args = parser.parse_args()
     _, _, messages_models, _ = load_protocol_models(args.models_config)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+    install_log_redaction()
     app = create_app(args.core_url, messages_models)
     runner = web.AppRunner(app)
     await runner.setup()

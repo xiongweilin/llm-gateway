@@ -11,6 +11,7 @@ import argparse
 import asyncio
 import json
 import logging
+from llm_gateway.secure_logging import install_log_redaction
 from collections.abc import Mapping
 from pathlib import Path
 import sys
@@ -272,6 +273,7 @@ def main() -> None:
     parser.add_argument("--models-config", required=True)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+    install_log_redaction()
     routes = load_model_routes(args.models_config)
     _, chat_models, messages_models, codex_responses_models = protocol_models(routes)
     web.run_app(

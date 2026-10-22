@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import logging
+from llm_gateway.secure_logging import install_log_redaction
 import os
 from collections.abc import Mapping
 from typing import Any
@@ -439,6 +440,7 @@ def main() -> None:
     parser.add_argument("--port", required=True, type=int)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+    install_log_redaction()
     routes = load_model_routes(args.config)
     _log_route_summary(routes)
     web.run_app(create_app(routes), host=args.host, port=args.port, access_log=None)
