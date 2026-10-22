@@ -79,7 +79,8 @@ def test_windows_token_acl_has_no_extra_principals(tmp_path):
     env = os.environ.copy()
     env["LLM_GATEWAY_TEST_AUTH"] = str(path)
     subprocess.run(
-        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+        [(shutil.which("pwsh.exe") or shutil.which("powershell.exe") or "powershell.exe"),
+         "-NoProfile", "-NonInteractive", "-Command", script],
         env=env,
         check=True,
     )
