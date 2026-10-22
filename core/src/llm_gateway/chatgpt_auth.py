@@ -9,6 +9,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
+
+from llm_gateway.credential_security import protect_existing_auth_file, write_private_auth_file
 from urllib.parse import urlencode
 
 import aiohttp
@@ -88,6 +90,7 @@ def _candidate_auth_files(
 
 
 def _read_auth_file(path: Path) -> dict[str, Any] | None:
+    protect_existing_auth_file(path)
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -96,14 +99,8 @@ def _read_auth_file(path: Path) -> dict[str, Any] | None:
 
 
 def _write_auth_file(path: Path, auth_data: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-    temporary.write_text(
-        json.dumps(dict(auth_data), ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(temporary, path)
-
+    payload = json.dumps(dict(auth_data), ensure_ascii=False, indent=2) + "\n"
+    write_private_auth_file(path, payload)
 
 def _build_auth_record(tokens: Mapping[str, str]) -> dict[str, Any]:
     access_token = tokens.get("access_token")
