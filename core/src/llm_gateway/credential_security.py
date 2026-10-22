@@ -70,8 +70,10 @@ def _protect_windows_file_identity(path: str, file_id: int) -> None:
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise PermissionError("could not protect OAuth credential ACL") from exc
     if result.returncode:
-        # Do not include PowerShell stdout/stderr: they may reveal local paths.
-        raise PermissionError("could not protect OAuth credential ACL")
+        # GitHub-hosted CI only: include stderr to diagnose an ACL incompatibility.
+        # Never print command output or local paths on a real deployment.
+        detail = result.stderr[-1200:] if env.get("CI") == "true" else ""
+        raise PermissionError("could not protect OAuth credential ACL" + detail)
 
 
 def _protect(path: Path, mode: int, *, directory: bool) -> None:
