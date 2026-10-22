@@ -1,14 +1,23 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
 import stat
 import subprocess
+import time
+
+from aiohttp import ClientSession
 
 import pytest
 
-from llm_gateway.chatgpt_auth import _read_auth_file, _write_auth_file
+from llm_gateway.chatgpt_auth import (
+    _candidate_auth_files,
+    _read_auth_file,
+    _write_auth_file,
+    get_chatgpt_credentials,
+)
 from llm_gateway.credential_security import write_private_auth_file
 
 
@@ -84,3 +93,100 @@ def test_windows_token_acl_has_no_extra_principals(tmp_path):
         env=env,
         check=True,
     )
+
+
+def _create_synthetic_auth(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"access_token": "synthetic-test-token", "expires_at": time.time() + 3600}),
+        encoding="utf-8",
+    )
+
+
+def _assert_configured_path_is_rejected(token_dir, auth_name="auth.json"):
+    environ = {"CHATGPT_TOKEN_DIR": str(token_dir), "CHATGPT_AUTH_FILE": auth_name}
+    candidate = _candidate_auth_files(environ, None)[0]
+    assert candidate == token_dir / auth_name
+
+    async def exercise():
+        async with ClientSession() as session:
+            await get_chatgpt_credentials(
+                session,
+                environ=environ,
+                allow_device_login=False,
+            )
+
+    with pytest.raises(PermissionError, match="symlinks or junctions"):
+        asyncio.run(exercise())
+    with pytest.raises(PermissionError, match="symlinks or junctions"):
+        _write_auth_file(candidate, {"access_token": "overwritten"})
+
+
+def test_config_entry_preserves_file_symlink_and_rejects_read_write(tmp_path):
+    real = tmp_path / "real.json"
+    _create_synthetic_auth(real)
+    token_dir = tmp_path / "tokens"
+    token_dir.mkdir()
+    link = token_dir / "auth.json"
+    try:
+        link.symlink_to(real)
+    except (OSError, NotImplementedError):
+        pytest.skip("file symlinks are not permitted on this host")
+    _assert_configured_path_is_rejected(token_dir)
+    assert json.loads(real.read_text())["access_token"] == "synthetic-test-token"
+
+
+def test_config_entry_rejects_linked_directory_component(tmp_path):
+    actual = tmp_path / "actual"
+    _create_synthetic_auth(actual / "auth.json")
+    linked = tmp_path / "linked"
+    try:
+        linked.symlink_to(actual, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("directory symlinks are not permitted on this host")
+    _assert_configured_path_is_rejected(linked)
+    assert json.loads((actual / "auth.json").read_text())["access_token"] == "synthetic-test-token"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction behavior")
+def test_config_entry_rejects_windows_junction(tmp_path):
+    actual = tmp_path / "real_tokens"
+    _create_synthetic_auth(actual / "auth.json")
+    junction = tmp_path / "junction_tokens"
+    creation = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(actual)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert creation.returncode == 0, "Windows CI must be able to create a junction"
+    # This is the exact configuration entry affected by the resolve() bypass.
+    _assert_configured_path_is_rejected(junction)
+    assert json.loads((actual / "auth.json").read_text())["access_token"] == "synthetic-test-token"
+
+
+def test_normal_config_entry_still_reads_credentials(tmp_path):
+    token_dir = tmp_path / "ordinary_tokens"
+    auth_file = token_dir / "auth.json"
+    _create_synthetic_auth(auth_file)
+    environ = {"CHATGPT_TOKEN_DIR": str(token_dir)}
+
+    async def exercise():
+        async with ClientSession() as session:
+            return await get_chatgpt_credentials(
+                session,
+                environ=environ,
+                allow_device_login=False,
+            )
+
+    credentials = asyncio.run(exercise())
+    assert credentials.access_token == "synthetic-test-token"
+
+
+def test_parent_traversal_is_not_accepted_as_credentials_path(tmp_path):
+    # Do not normalize ".." before inspecting the original components.
+    candidate = tmp_path / "tokens" / ".." / "real.json"
+    with pytest.raises(PermissionError, match="must not contain"):
+        _read_auth_file(candidate)
+    with pytest.raises(PermissionError, match="must not contain"):
+        _write_auth_file(candidate, {"access_token": "nope"})
