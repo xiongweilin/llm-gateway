@@ -18,7 +18,7 @@ $ErrorActionPreference = 'Stop'
 $path = $env:LLM_GATEWAY_PRIVATE_PATH
 if ([string]::IsNullOrWhiteSpace($path)) { throw 'missing credential path' }
 $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-$system = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')
+$system = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
 $item = Get-Item -LiteralPath $path -Force
 $acl = Get-Acl -LiteralPath $path
 $acl.SetAccessRuleProtection($true, $false)
@@ -31,7 +31,7 @@ if ($item.PSIsContainer) {
     $flags = [System.Security.AccessControl.InheritanceFlags]::None
 }
 foreach ($sid in @($me, $system)) {
-    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+    $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
         $sid,
         [System.Security.AccessControl.FileSystemRights]::FullControl,
         $flags,
