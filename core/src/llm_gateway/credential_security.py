@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import functools
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -60,7 +61,8 @@ def _protect_windows_file_identity(path: str, file_id: int) -> None:
     env["LLM_GATEWAY_PRIVATE_PATH"] = path
     try:
         result = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", _WINDOWS_ACL_SCRIPT],
+            [(shutil.which("pwsh.exe") or shutil.which("powershell.exe") or "powershell.exe"),
+             "-NoProfile", "-NonInteractive", "-Command", _WINDOWS_ACL_SCRIPT],
             env=env,
             text=True,
             capture_output=True,
@@ -70,10 +72,8 @@ def _protect_windows_file_identity(path: str, file_id: int) -> None:
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise PermissionError("could not protect OAuth credential ACL") from exc
     if result.returncode:
-        # GitHub-hosted CI only: include stderr to diagnose an ACL incompatibility.
-        # Never print command output or local paths on a real deployment.
-        detail = result.stderr[-1200:] if env.get("CI") == "true" else ""
-        raise PermissionError("could not protect OAuth credential ACL" + detail)
+        # Do not include PowerShell output: it could reveal local paths.
+        raise PermissionError("could not protect OAuth credential ACL")
 
 
 def _protect(path: Path, mode: int, *, directory: bool) -> None:
