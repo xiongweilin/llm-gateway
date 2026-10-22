@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import json
 import logging
+from llm_gateway.secure_logging import install_log_redaction
 import math
 import os
 import sys
@@ -1093,7 +1094,7 @@ async def create_muse_compaction_checkpoint(
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
-            log.warning("Muse checkpoint generation failed; using bounded fallback: %s", exc)
+            log.warning("Muse checkpoint generation failed; using bounded fallback: %s", type(exc).__name__)
             summary = _deterministic_checkpoint(existing_summary, source)
             method = "fallback"
 
@@ -2953,7 +2954,7 @@ async def handle(
                 )
                 await asyncio.sleep(delay)
                 continue
-            log.warning("backend request failed: %s", exc)
+            log.warning("backend request failed: %s", type(exc).__name__)
             if prepared_stream_response is not None:
                 return await _finish_prepared_stream_error(
                     prepared_stream_response,
@@ -2961,7 +2962,7 @@ async def handle(
                 )
             return aiohttp.web.Response(status=502, text="unified-protocol-proxy: backend unreachable")
         except Exception as exc:  # noqa: BLE001
-            log.warning("backend request failed: %s", exc)
+            log.warning("backend request failed: %s", type(exc).__name__)
             if prepared_stream_response is not None:
                 return await _finish_prepared_stream_error(
                     prepared_stream_response,
@@ -2982,6 +2983,7 @@ async def main() -> None:
     args = parser.parse_args()
     responses_models, _, _, _ = load_protocol_models(args.models_config)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+    install_log_redaction()
     # 桌面端打开会话会发送完整历史（+工具 schema），超过 aiohttp 默认
     # 1MB 请求体上限会返回 413；调大至 128MB。
     app = aiohttp.web.Application(client_max_size=128 * 1024 * 1024)
