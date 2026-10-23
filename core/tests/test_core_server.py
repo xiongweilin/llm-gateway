@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from llm_gateway.chatgpt_auth import ChatGPTCredentials
@@ -144,6 +145,45 @@ def test_chatgpt_route_supplies_legacy_provider_headers_when_client_omits_them()
     assert actual["User-Agent"].startswith("codex_cli_rs/")
     assert actual["session_id"]
     assert actual["Accept-Encoding"] == "identity"
+
+
+@pytest.mark.parametrize("header_name", [
+    "conversation_id", "openai-beta", "thread_id", "x-codex-beta-features",
+    "x-codex-installation-id", "x-codex-parent-thread-id", "x-codex-turn-metadata",
+    "x-codex-window-id", "x-openai-subagent",
+])
+def test_codex_metadata_headers_survive_case_insensitive_filtering(header_name):
+    route = ModelRoute(
+        id="codex-model", mode="responses", upstream_model="provider-model",
+        api_base="https://chatgpt.com/backend-api/codex", authorization="chatgpt",
+    )
+    actual = build_upstream_headers(
+        {header_name.upper(): "synthetic-metadata", "X-Unrelated": "drop-me"},
+        route, environ={},
+        chatgpt_credentials=ChatGPTCredentials(access_token="synthetic-token", account_id=None),
+    )
+    assert actual[header_name.upper()] == "synthetic-metadata"
+    assert "X-Unrelated" not in actual
+    assert actual["Authorization"] == "Bearer synthetic-token"
+
+
+def test_codex_payload_preserves_client_options_and_still_normalizes_streaming():
+    options = {
+        "client_metadata": {"session": "synthetic-session"},
+        "parallel_tool_calls": False,
+        "prompt_cache_key": "synthetic-cache",
+        "service_tier": "auto",
+        "stream_options": {"include_usage": True},
+        "text": {"format": {"type": "json_object"}},
+    }
+    payload = {"model": "synthetic-model", "input": [], "stream": False,
+               "store": True, "unsupported": "drop-me", **options}
+    normalize_chatgpt_responses_payload(payload)
+    assert all(payload[key] == value for key, value in options.items())
+    assert payload["stream"] is True
+    assert payload["store"] is False
+    assert "reasoning.encrypted_content" in payload["include"]
+    assert "unsupported" not in payload
 
 
 def test_chatgpt_responses_payload_matches_legacy_provider_contract() -> None:

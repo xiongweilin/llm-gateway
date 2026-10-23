@@ -18,7 +18,12 @@ from llm_gateway.chatgpt_auth import (
     _write_auth_file,
     get_chatgpt_credentials,
 )
-from llm_gateway.credential_security import write_private_auth_file
+from llm_gateway.credential_security import (
+    _protect,
+    _protect_windows_file_identity,
+    protect_existing_auth_file,
+    write_private_auth_file,
+)
 
 
 def test_auth_write_and_refresh_use_private_atomic_files(tmp_path):
@@ -93,6 +98,61 @@ def test_windows_token_acl_has_no_extra_principals(tmp_path):
         env=env,
         check=True,
     )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows ACL repair")
+@pytest.mark.parametrize("state", ["read-only-user", "missing-system", "directory-no-inheritance"])
+def test_windows_acl_repairs_allowed_principals_with_insufficient_rights(tmp_path, state):
+    directory = state == "directory-no-inheritance"
+    path = tmp_path / ("private" if directory else "synthetic.json")
+    if directory:
+        path.mkdir()
+    else:
+        path.write_text("synthetic", encoding="utf-8")
+    _protect(path, 0o700 if directory else 0o600, directory=directory)
+    env = os.environ.copy()
+    env["GATEWAY_TEST_ACL_PATH"] = str(path)
+    env["GATEWAY_TEST_ACL_STATE"] = state
+    shell = shutil.which("pwsh.exe") or shutil.which("powershell.exe") or "powershell.exe"
+    subprocess.run([shell, "-NoProfile", "-NonInteractive", "-Command", """
+$ErrorActionPreference = 'Stop'
+$path = $env:GATEWAY_TEST_ACL_PATH
+$me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+switch ($env:GATEWAY_TEST_ACL_STATE) {
+    'read-only-user' { & icacls.exe $path /grant:r "*${me}:R" | Out-Null }
+    'missing-system' { & icacls.exe $path /remove '*S-1-5-18' | Out-Null }
+    'directory-no-inheritance' { & icacls.exe $path /grant:r "*${me}:F" '*S-1-5-18:F' | Out-Null }
+}
+if ($LASTEXITCODE -ne 0) { throw 'synthetic ACL setup failed' }
+"""], env=env, check=True, capture_output=True, text=True)
+
+    _protect_windows_file_identity.cache_clear()
+    if directory:
+        _protect(path, 0o700, directory=True)
+        (path / "synthetic-child.txt").write_text("synthetic", encoding="utf-8")
+    else:
+        protect_existing_auth_file(path)
+        path.write_text("synthetic-updated", encoding="utf-8")
+
+    subprocess.run([shell, "-NoProfile", "-NonInteractive", "-Command", """
+$ErrorActionPreference = 'Stop'
+$acl = Get-Acl -LiteralPath $env:GATEWAY_TEST_ACL_PATH
+if (-not $acl.AreAccessRulesProtected) { throw 'inheritance was not disabled' }
+$me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$seen = @{}
+foreach ($rule in $acl.Access) {
+    $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+    if ($sid -notin @($me, 'S-1-5-18')) { throw 'unexpected principal' }
+    if ($rule.AccessControlType -ne 'Allow') { throw 'unexpected deny rule' }
+    $fullControl = [Security.AccessControl.FileSystemRights]::FullControl
+    if (($rule.FileSystemRights -band $fullControl) -ne $fullControl) { throw 'missing full control' }
+    if ($env:GATEWAY_TEST_ACL_STATE -eq 'directory-no-inheritance') {
+        if (($rule.InheritanceFlags -band 3) -ne 3 -or [int]$rule.PropagationFlags -ne 0) { throw 'missing child inheritance' }
+    }
+    $seen[$sid] = $true
+}
+if (-not $seen.ContainsKey($me) -or -not $seen.ContainsKey('S-1-5-18')) { throw 'required principal missing' }
+"""], env=env, check=True, capture_output=True, text=True)
 
 
 def _create_synthetic_auth(path):

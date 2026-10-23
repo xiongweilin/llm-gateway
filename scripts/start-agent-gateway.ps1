@@ -39,6 +39,10 @@ $ChatUrl = "http://${ListenHost}:$ChatPort"
 $MessagesUrl = "http://${ListenHost}:$MessagesPort"
 $ControlPlaneBackend = [string]$GatewayConfig.control_plane_backend
 
+# 子进程继承本进程环境；仅补充缺失的代理，不覆盖显式配置。
+. (Join-Path $PSScriptRoot 'gateway-proxy.ps1')
+Initialize-GatewayProxyEnvironment
+
 foreach ($requiredPath in @($ModelsPath, $AgentEntry, $ResponsesEntry, $ChatEntry, $MessagesEntry)) {
     if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
         throw "required gateway file is missing: $requiredPath"

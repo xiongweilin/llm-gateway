@@ -22,35 +22,66 @@ $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
 $system = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
 $item = Get-Item -LiteralPath $path -Force
 $acl = Get-Acl -LiteralPath $path
-$acl.SetAccessRuleProtection($true, $false)
-foreach ($rule in @($acl.Access)) {
-    [void]$acl.RemoveAccessRuleSpecific($rule)
-}
-if ($item.PSIsContainer) {
-    $flags = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
-} else {
-    $flags = [System.Security.AccessControl.InheritanceFlags]::None
-}
-foreach ($sid in @($me, $system)) {
-    $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
-        $sid,
-        [System.Security.AccessControl.FileSystemRights]::FullControl,
-        $flags,
-        [System.Security.AccessControl.PropagationFlags]::None,
-        [System.Security.AccessControl.AccessControlType]::Allow
-    )
-    [void]$acl.AddAccessRule($rule)
-}
-Set-Acl -LiteralPath $path -AclObject $acl
-$actual = Get-Acl -LiteralPath $path
-if (-not $actual.AreAccessRulesProtected) { throw 'ACL inheritance still enabled' }
 $allowed = @($me.Value, $system.Value)
-foreach ($rule in $actual.Access) {
-    $sid = $rule.IdentityReference.Translate(
-        [System.Security.Principal.SecurityIdentifier]
-    ).Value
-    if ($sid -notin $allowed) { throw 'unexpected principal can access credential' }
+function Test-PrivateAcl($candidate) {
+    if (-not $candidate.AreAccessRulesProtected) { return $false }
+    $fullControl = [System.Security.AccessControl.FileSystemRights]::FullControl
+    $requiredFlags = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+    $fullAccess = @{}
+    foreach ($rule in $candidate.Access) {
+        try {
+            $sid = $rule.IdentityReference.Translate(
+                [System.Security.Principal.SecurityIdentifier]
+            ).Value
+        } catch {
+            return $false
+        }
+        if ($sid -notin $allowed -or $rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) {
+            return $false
+        }
+        if (($rule.FileSystemRights -band $fullControl) -ne $fullControl) { continue }
+        if ($rule.PropagationFlags -ne [System.Security.AccessControl.PropagationFlags]::None) { continue }
+        if ($item.PSIsContainer -and ($rule.InheritanceFlags -band $requiredFlags) -ne $requiredFlags) {
+            continue
+        }
+        $fullAccess[$sid] = $true
+    }
+    return ($fullAccess.ContainsKey($me.Value) -and $fullAccess.ContainsKey($system.Value))
 }
+if (Test-PrivateAcl $acl) { exit 0 }
+
+# 只修改 DACL，避免 Set-Acl 写入完整安全描述符时要求额外特权。
+# 先保留当前用户和 SYSTEM 的显式授权，再移除继承，避免中途丢失访问权。
+if ($item.PSIsContainer) {
+    $grantMe = "*${me}:(OI)(CI)F"
+    $grantSystem = "*S-1-5-18:(OI)(CI)F"
+} else {
+    $grantMe = "*${me}:F"
+    $grantSystem = "*S-1-5-18:F"
+}
+& icacls.exe $path /grant:r $grantMe $grantSystem | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'could not grant credential ACL access' }
+& icacls.exe $path /inheritance:r | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'could not disable ACL inheritance' }
+$acl = Get-Acl -LiteralPath $path
+foreach ($rule in @($acl.Access)) {
+    try {
+        $sid = $rule.IdentityReference.Translate(
+            [System.Security.Principal.SecurityIdentifier]
+        ).Value
+    } catch {
+        $sid = $null
+    }
+    if ($null -eq $sid) { throw 'could not identify credential ACL principal' }
+    if ($sid -notin $allowed -or $rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) {
+        & icacls.exe $path /remove "*$sid" | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'could not remove unexpected credential ACL principal' }
+    }
+}
+& icacls.exe $path /grant:r $grantMe $grantSystem | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'could not grant credential ACL access' }
+$actual = Get-Acl -LiteralPath $path
+if (-not (Test-PrivateAcl $actual)) { throw 'credential ACL is not private and writable' }
 """
 
 

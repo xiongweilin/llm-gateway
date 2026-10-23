@@ -62,5 +62,5 @@ jobs:
         uses: astral-sh/setup-uv@v7
       - name: Sync locked dependencies
         run: uv sync --locked --group dev
-      - name: Verify NTFS credential ACLs and log redaction
-        run: uv run pytest -q tests/test_credential_security.py tests/test_secure_logging.py
+      - name: Verify NTFS credential ACLs, startup proxies, and log redaction
+        run: uv run pytest -q tests/test_credential_security.py tests/test_gateway_proxy.py tests/test_secure_logging.py

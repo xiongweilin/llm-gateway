@@ -44,6 +44,16 @@ LEGACY_CODEX_UPSTREAM_HEADERS = {
     "originator",
     "session_id",
     "user-agent",
+    # 保留 Codex 客户端携带的会话标识和功能标记。
+    "conversation_id",
+    "openai-beta",
+    "thread_id",
+    "x-codex-beta-features",
+    "x-codex-installation-id",
+    "x-codex-parent-thread-id",
+    "x-codex-turn-metadata",
+    "x-codex-window-id",
+    "x-openai-subagent",
 }
 CHATGPT_RESPONSES_ALLOWED_KEYS = {
     "model",
@@ -57,6 +67,13 @@ CHATGPT_RESPONSES_ALLOWED_KEYS = {
     "reasoning",
     "previous_response_id",
     "truncation",
+    # 保留客户端请求中的并行工具、缓存、输出格式与服务等级参数。
+    "client_metadata",
+    "parallel_tool_calls",
+    "prompt_cache_key",
+    "service_tier",
+    "stream_options",
+    "text",
 }
 DEFAULT_CHATGPT_ORIGINATOR = "codex_cli_rs"
 DEFAULT_CHATGPT_USER_AGENT = "codex_cli_rs/0.0.0 (Unknown 0; unknown) unknown"
