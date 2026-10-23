@@ -49,3 +49,5 @@ pwsh -NoProfile -File .\scripts\stop-agent-gateway.ps1
 ```
 
 启动/停止脚本会相对于自身位置解析仓库根目录，并从 `config/gateway.json` 读取 host、port 和路由位置，因此不依赖固定 checkout 路径。
+
+Windows 启动时会从已启用的系统代理中分别补全缺失的 `HTTP_PROXY` 和 `HTTPS_PROXY`，保留按协议配置的代理及显式环境变量覆盖，并在 `NO_PROXY` 中补齐 `127.0.0.1`、`localhost` 和 `::1`，让本地服务流量直连。现有进程保持启动时的环境；更新这些文件不会重新加载运行中的服务。

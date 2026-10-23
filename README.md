@@ -76,3 +76,9 @@ pwsh -NoProfile -File .\scripts\stop-agent-gateway.ps1
 The start/stop scripts resolve the repository root relative to themselves and
 read host, ports, and route locations from `config/gateway.json`. They do not
 require a fixed checkout path.
+
+On Windows, startup fills missing `HTTP_PROXY` and `HTTPS_PROXY` values from
+the enabled system proxy, keeping protocol-specific settings and explicit
+environment overrides. It adds `127.0.0.1`, `localhost`, and `::1` to `NO_PROXY`
+for local service traffic. Existing processes retain their startup environment;
+updating these files does not reload running services.
