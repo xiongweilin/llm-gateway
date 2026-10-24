@@ -2428,9 +2428,8 @@ def truncate_input(body: bytes) -> bytes:
 
 
 def decompress(body: bytes, encoding: str) -> bytes:
-    # aiohttp 3.14 已按 Content-Encoding 自动解压请求体（实测 zstd 也被
-    # 解压成 JSON）。仅当 body 仍以 zstd magic 开头时手动解压，作为
-    # 未来行为差异的防御。
+    # aiohttp 3.14 已按 Content-Encoding 自动解压；若原始 zstd frame 仍
+    # 留在 body 中（例如上游省略 Content-Encoding），则手动解压兜底。
     if body[:4] == b"\x28\xb5\x2f\xfd":
         dctx = zstandard.ZstdDecompressor()
         dobj = dctx.decompressobj()
@@ -2439,6 +2438,41 @@ def decompress(body: bytes, encoding: str) -> bytes:
         return out
     enc = (encoding or "").lower()
     return body
+
+
+def normalize_collaboration_response_body(body: bytes) -> tuple[bytes, str, int] | None:
+    """Normalize collaboration calls in JSON/SSE bodies, including zstd frames."""
+    try:
+        decoded = decompress(body, "")
+    except zstandard.ZstdError:
+        return None
+
+    leading = decoded.lstrip(b"\xef\xbb\xbf \t\r\n")
+    if leading.startswith((b"data:", b"event:", b"id:")):
+        rewritten, _, changed = rewrite_sse_collaboration_calls(
+            decoded,
+            final=True,
+            rewrite_collaboration=True,
+        )
+        if changed:
+            return rewritten, "text/event-stream", changed
+        return None
+
+    try:
+        value = json.loads(decoded)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(value, (dict, list)):
+        return None
+
+    changed = _force_plaintext_collaboration_calls(value)
+    if not changed:
+        return None
+    return (
+        json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode(),
+        "application/json",
+        changed,
+    )
 
 
 def normalize_scalar_responses_input(body: bytes) -> bytes:
@@ -2831,45 +2865,50 @@ async def handle(
                     and req.path == RESPONSES_PATH
                     and collaboration_compatibility
                     and not upstream_is_sse
-                    and up.content_type == "application/json"
+                    and up.content_type in {"application/json", "application/octet-stream"}
                     and 200 <= up.status < 300
                 ):
                     upstream_body = await up.read()
-                    try:
-                        completed = json.loads(upstream_body)
-                    except (json.JSONDecodeError, UnicodeDecodeError):
-                        completed = None
-                    rewritten_calls = 0
-                    if isinstance(completed, (dict, list)):
-                        rewritten_calls = _force_plaintext_collaboration_calls(completed)
-                        if rewritten_calls:
-                            upstream_body = json.dumps(
-                                completed,
-                                ensure_ascii=False,
-                                separators=(",", ":"),
-                            ).encode()
-                            log.info(
-                                "response compatibility: normalized_function_args_or_collaboration=%d",
-                                rewritten_calls,
-                            )
+                    normalized = normalize_collaboration_response_body(upstream_body)
+                    if normalized is not None:
+                        upstream_body, normalized_content_type, rewritten_calls = normalized
+                        response_headers = {
+                            key: value
+                            for key, value in up.headers.items()
+                            if key.lower()
+                            not in {
+                                "content-length",
+                                "content-type",
+                                "content-encoding",
+                                "transfer-encoding",
+                                "connection",
+                            }
+                        }
+                        log.info(
+                            "response compatibility: normalized_function_args_or_collaboration=%d",
+                            rewritten_calls,
+                        )
+                        return aiohttp.web.Response(
+                            status=up.status,
+                            body=upstream_body,
+                            headers=response_headers,
+                            content_type=normalized_content_type,
+                            charset="utf-8",
+                        )
+                    if up.content_type == "application/octet-stream":
+                        log.info(
+                            "collaboration response compatibility: octet-stream not rewritten"
+                        )
                     response_headers = {
                         key: value
                         for key, value in up.headers.items()
                         if key.lower()
-                        not in {
-                            "content-length",
-                            "content-type",
-                            "content-encoding",
-                            "transfer-encoding",
-                            "connection",
-                        }
+                        not in {"content-length", "transfer-encoding", "connection"}
                     }
                     return aiohttp.web.Response(
                         status=up.status,
                         body=upstream_body,
                         headers=response_headers,
-                        content_type=up.content_type,
-                        charset=up.charset,
                     )
 
                 if req.method == "POST" and req.path == RESPONSES_PATH and not caller_stream and upstream_is_sse:
