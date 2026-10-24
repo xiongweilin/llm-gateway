@@ -2826,6 +2826,52 @@ async def handle(
                         headers=response_headers,
                     )
 
+                if (
+                    req.method == "POST"
+                    and req.path == RESPONSES_PATH
+                    and collaboration_compatibility
+                    and not upstream_is_sse
+                    and up.content_type == "application/json"
+                    and 200 <= up.status < 300
+                ):
+                    upstream_body = await up.read()
+                    try:
+                        completed = json.loads(upstream_body)
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        completed = None
+                    rewritten_calls = 0
+                    if isinstance(completed, (dict, list)):
+                        rewritten_calls = _force_plaintext_collaboration_calls(completed)
+                        if rewritten_calls:
+                            upstream_body = json.dumps(
+                                completed,
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ).encode()
+                            log.info(
+                                "response compatibility: normalized_function_args_or_collaboration=%d",
+                                rewritten_calls,
+                            )
+                    response_headers = {
+                        key: value
+                        for key, value in up.headers.items()
+                        if key.lower()
+                        not in {
+                            "content-length",
+                            "content-type",
+                            "content-encoding",
+                            "transfer-encoding",
+                            "connection",
+                        }
+                    }
+                    return aiohttp.web.Response(
+                        status=up.status,
+                        body=upstream_body,
+                        headers=response_headers,
+                        content_type=up.content_type,
+                        charset=up.charset,
+                    )
+
                 if req.method == "POST" and req.path == RESPONSES_PATH and not caller_stream and upstream_is_sse:
                     upstream_body = await up.read()
                     aggregated, rewritten_calls = aggregate_responses_sse(
