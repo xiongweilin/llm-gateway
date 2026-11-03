@@ -1,9 +1,9 @@
 # 同步 Codex 模型目录与 Gateway GPT 路由。
 #
 # 默认行为：
-# - 从当前 Codex 二进制附带的模型目录发现最新 sol/luna；
+# - 从官方 Codex 源码模型目录发现最新 sol/terra/luna；
 # - Codex 运行时缓存、显示目录和 Gateway 路由只保留各系列最新版本；
-# - 追加受控的 supplemental models；
+# - 仅保留显式启用的 supplemental models；
 # - 清理其他模型，保持固定顺序并去重；
 # - 只在生成并校验完整内容后替换目标文件，失败不会破坏现有配置；
 # - 路由变化后重启 Gateway，使旧模型 ID 立即不可调用。
@@ -15,12 +15,13 @@ param(
     [string]$GatewayModelsPath,
     [string]$GatewayStartScript = (Join-Path $PSScriptRoot "start-agent-gateway.ps1"),
     [switch]$CheckOnly,
-    [switch]$NoRestart
+    [switch]$NoRestart,
+    [string]$OfficialCatalogUri = 'https://raw.githubusercontent.com/openai/codex/main/codex-rs/models-manager/models.json'
 )
 
 $ErrorActionPreference = "Stop"
 
-# 模型 ID 在运行时从已安装的 Codex 内置 catalog 中发现。
+# 模型 ID 在运行时从官方 Codex 源码 catalog 中发现。
 $AllowedModelSlugs = @()
 $OfficialModelContextWindowOverrides = @{
     # 在未来模型版本更新时保留请求的 Codex 上下文大小。
@@ -37,6 +38,27 @@ function Get-OfficialModelContextWindowOverride {
 }
 
 $SupplementalModelDefinitions = [ordered]@{
+    "opencode-go/deepseek-v4.1-flash" = [ordered]@{
+        DisplayName = "DeepSeek V4.1 Flash (OpenCode Go)"
+        Description = "OpenCode Go DeepSeek V4.1 Flash routed through the local LLM Gateway."
+        Priority = 5
+        ContextWindow = 1000000
+        AutoCompactTokenLimit = 900000
+        MaxOutputTokens = 384000
+        DefaultReasoningLevel = "high"
+        SupportedReasoningLevels = @(
+            [ordered]@{ effort = "low"; description = "Lower latency and lighter reasoning" }
+            [ordered]@{ effort = "high"; description = "Deeper reasoning for complex tasks" }
+            [ordered]@{ effort = "max"; description = "Maximum reasoning depth" }
+        )
+        InputModalities = @("text", "image")
+        SupportsSearchTool = $false
+        SupportsParallelToolCalls = $false
+        SupportsReasoningEffortUpdates = $false
+        RemoveServiceTierMetadata = $true
+        UseResponsesLite = $false
+    }
+    <# 暂停非 GPT 模型；保留定义供显式恢复。
     "opencode-go/deepseek-flash" = [ordered]@{
         DisplayName = "DeepSeek Flash (OpenCode Go)"
         Description = "OpenCode Go DeepSeek Flash model routed through the local LLM Gateway."
@@ -108,6 +130,7 @@ $SupplementalModelDefinitions = [ordered]@{
     #     # 在真实 protocol probe 确认前，保持本地 catalog 保守。
     #     ContextWindow = 400000
     # }
+    #>
 }
 $SupplementalModelSlugs = @($SupplementalModelDefinitions.Keys)
 $ManagedModelSlugs = @()
@@ -125,20 +148,9 @@ function Add-UniqueModel {
 }
 
 function Read-ModelCatalog {
-    $codexCommand = Get-Command codex.exe -CommandType Application -ErrorAction Stop |
-        Select-Object -First 1
-    $raw = & $codexCommand.Source debug models --bundled 2>&1 | Out-String
-    if ($LASTEXITCODE -ne 0) {
-        throw "读取 Codex bundled model catalog 失败（exit=$LASTEXITCODE）：$raw"
-    }
-    try {
-        $catalog = $raw | ConvertFrom-Json
-    }
-    catch {
-        throw "Codex bundled model catalog 无法解析: $($_.Exception.Message)"
-    }
+    $catalog = Invoke-RestMethod -Uri $OfficialCatalogUri -TimeoutSec 30
     if ($null -eq $catalog.models -or $catalog.models -isnot [array]) {
-        throw "Codex bundled model catalog 没有 models 数组"
+        throw "Official Codex catalog has no models array"
     }
     return $catalog
 }
@@ -168,7 +180,7 @@ function Get-LatestOfficialModelSlugs {
     foreach ($model in $Catalog.models) {
         $match = [regex]::Match(
             [string]$model.slug,
-            '^gpt-(?<version>\d+(?:\.\d+)*?)-(?<family>sol|luna)$'
+            '^gpt-(?<version>\d+(?:\.\d+)*?)-(?<family>sol|terra|luna)$'
         )
         if (-not $match.Success) { continue }
         if ([string]$model.visibility -cne "list" -or $model.supported_in_api -ne $true) {
@@ -197,12 +209,12 @@ function Get-LatestOfficialModelSlugs {
         }
     }
 
-    foreach ($family in @("sol", "luna")) {
+    foreach ($family in @("sol", "terra", "luna")) {
         if (-not $latest.ContainsKey($family)) {
-            throw "Codex bundled model catalog has no visible, API-supported gpt-$family model"
+            throw "Official Codex model catalog has no visible, API-supported gpt-$family model"
         }
     }
-    return @($latest["sol"].Slug, $latest["luna"].Slug)
+    return @($latest["sol"].Slug, $latest["terra"].Slug, $latest["luna"].Slug)
 }
 
 function Set-ModelProperty {
@@ -263,11 +275,19 @@ function Set-SupplementalCodexModelMetadata {
     if ($null -ne $definition.SupportsParallelToolCalls) {
         Set-ModelProperty -Object $Object -Name "supports_parallel_tool_calls" -Value $definition.SupportsParallelToolCalls
     }
+    if ($null -ne $definition.SupportsReasoningEffortUpdates) {
+        Set-ModelProperty -Object $Object -Name "supports_reasoning_effort_updates" -Value $definition.SupportsReasoningEffortUpdates
+    }
     if ($null -ne $definition.AutoCompactTokenLimit) {
         Set-ModelProperty -Object $Object -Name "auto_compact_token_limit" -Value $definition.AutoCompactTokenLimit
     }
     if ($null -ne $definition.UseResponsesLite) {
         Set-ModelProperty -Object $Object -Name "use_responses_lite" -Value $definition.UseResponsesLite
+    }
+    if ($definition.RemoveServiceTierMetadata) {
+        foreach ($propertyName in @("default_service_tier", "service_tiers", "additional_speed_tiers")) {
+            [void]$Object.PSObject.Properties.Remove($propertyName)
+        }
     }
     return $Object
 }
@@ -413,13 +433,13 @@ function Get-ManagedDisplayCatalogModels {
             $SourceCatalog.models | Where-Object { [string]$_.slug -ceq $slug }
         ) | Select-Object -First 1
         if ($null -eq $sourceModel) {
-            throw "Codex bundled model catalog 缺少最新模型: $slug"
+            throw "Official Codex model catalog 缺少最新模型: $slug"
         }
         $displayModel = @(
             $existingModels | Where-Object { [string]$_.slug -ceq $slug }
         ) | Select-Object -First 1
         if ($null -eq $displayModel) {
-            $family = if ($slug -match '-sol$') { 'sol' } else { 'luna' }
+            $family = if ($slug -match '-sol$') { 'sol' } elseif ($slug -match '-terra$') { 'terra' } else { 'luna' }
             $displayModel = @(
                 $existingModels | Where-Object {
                     [string]$_.slug -match "^gpt-\d+(?:\.\d+)*-$family$"
@@ -427,7 +447,7 @@ function Get-ManagedDisplayCatalogModels {
             ) | Select-Object -First 1
         }
         if ($null -eq $displayModel) {
-            throw "无法为 Codex 显示模型创建 $slug 的目录元数据模板"
+            $displayModel = $sourceModel
         }
 
         $displayModel = $displayModel | ConvertTo-Json -Depth 100 | ConvertFrom-Json
@@ -587,7 +607,7 @@ function Get-GatewayModelsPlan {
         if (-not $idMatch.Success) { throw "无法解析 Gateway 模型路由行: $($blockLines[0])" }
         $familyMatch = [regex]::Match(
             $idMatch.Groups["id"].Value,
-            '^gpt-(?<version>\d+(?:\.\d+)*)-(?<family>sol|luna)$'
+            '^gpt-(?<version>\d+(?:\.\d+)*)-(?<family>sol|terra|luna)$'
         )
         $family = if ($familyMatch.Success) { $familyMatch.Groups["family"].Value } else { $null }
         $blocks.Add([pscustomobject]@{
@@ -600,11 +620,12 @@ function Get-GatewayModelsPlan {
 
     $latestByFamily = @{
         sol = ($LatestSlugs | Where-Object { $_ -match '-sol$' } | Select-Object -First 1)
+        terra = ($LatestSlugs | Where-Object { $_ -match '-terra$' } | Select-Object -First 1)
         luna = ($LatestSlugs | Where-Object { $_ -match '-luna$' } | Select-Object -First 1)
     }
     $selectedIndexByFamily = @{}
     $retiredIds = [System.Collections.Generic.List[string]]::new()
-    foreach ($family in @("sol", "luna")) {
+    foreach ($family in @("sol", "terra", "luna")) {
         $candidates = @(
             for ($index = 0; $index -lt $blocks.Count; $index++) {
                 if ($blocks[$index].Family -ceq $family) {
@@ -693,7 +714,7 @@ function Get-GatewayModelsPlan {
         Content = $newContent
         Changed = $newContent -cne $Content
         CurrentGptIds = @($blocks | Where-Object { $null -ne $_.Family } | ForEach-Object { $_.Id })
-        LatestIds = @($latestByFamily.sol, $latestByFamily.luna)
+        LatestIds = @($latestByFamily.sol, $latestByFamily.terra, $latestByFamily.luna)
         RetiredIds = $retiredIds.ToArray()
         RouteIds = $routeIds.ToArray()
     }
@@ -722,7 +743,7 @@ function Get-AllowedModelSlugs {
     )
 
     if ($null -eq $Catalog.models) {
-        throw "Codex bundled model catalog 没有 models 数组"
+        throw "Official Codex model catalog 没有 models 数组"
     }
 
     $models = [System.Collections.Generic.List[string]]::new()
@@ -735,14 +756,14 @@ function Get-AllowedModelSlugs {
             $Catalog.models | Where-Object { [string]$_.slug -eq $slug }
         ) | Select-Object -First 1
         if ($null -eq $entry) {
-            throw "Codex bundled model catalog 缺少最新模型: $slug"
+            throw "Official Codex model catalog 缺少最新模型: $slug"
         }
 
         Add-UniqueModel -Models $models -Model $slug
     }
 
     if ($models.Count -ne $AllowedModelSlugs.Count) {
-        throw "Codex bundled model catalog 未包含完整的 sol/luna 模型集合"
+        throw "Official Codex model catalog 未包含完整的 sol/terra/luna 模型集合"
     }
     return $models.ToArray()
 }
@@ -775,7 +796,7 @@ if ($CheckOnly) {
     }
     $existingDisplayCatalog = Get-Content -Raw -LiteralPath $CodexDisplayCatalogPath | ConvertFrom-Json
     $displayPreview = @(Get-ManagedDisplayCatalogModels -SourceCatalog $catalog -ExistingCatalog $existingDisplayCatalog)
-    Write-Output "Codex bundled latest models: $($models -join ', ')"
+    Write-Output "Official Codex latest models: $($models -join ', ')"
     Write-Output "Current Gateway GPT routes: $($gatewayPlan.CurrentGptIds -join ', ')"
     if ($gatewayPlan.RetiredIds.Count -gt 0) {
         Write-Output "Will retire (not callable after apply): $($gatewayPlan.RetiredIds -join ', ')"
@@ -784,7 +805,7 @@ if ($CheckOnly) {
         Write-Output "Will update Gateway routes to: $($gatewayPlan.LatestIds -join ', ')"
     }
     else {
-        Write-Output "Gateway GPT routes already match the latest bundled catalog"
+        Write-Output "Gateway GPT routes already match the latest official catalog"
     }
     Write-Output "Codex display catalog validation passed for $($displayPreview.Count) managed models"
     Write-Output "Managed Codex model catalog after apply: $($ManagedModelSlugs -join ', ')"
@@ -814,7 +835,7 @@ try {
     }
     else {
         $gatewayChanged = $false
-        Write-Host "Gateway GPT routes already match the bundled catalog"
+        Write-Host "Gateway GPT routes already match the official catalog"
     }
 }
 catch {

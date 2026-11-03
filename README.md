@@ -60,6 +60,40 @@ device-code login use the same OAuth flow as the previous LiteLLM path.
 The Core sends requests directly to the configured provider API. The public
 model id remains stable while `upstream_model` selects the provider-side model.
 
+### OpenCode Go Responses compatibility
+
+Codex sends Responses requests to 4101; the Agent entry dispatches them through
+the 4102 Responses adapter to the 4100 routing Core. Port 4103 serves clients
+that send Chat Completions and is not in Codex's Responses request path.
+DeepSeek V4.1 Flash currently advertises a Chat Completions upstream, so
+OpenCode Go handles its `/responses` requests through portable routing. The
+Responses adapter preserves the full `input`, `stream`, and the
+`x-opencode-session` HTTP header, while removing `stream_options` and the
+internal body-level `extra_headers` field that the portable route rejects.
+The session value is derived from Codex conversation metadata before forwarding.
+Portable routing requires the complete current conversation in `input`; the
+Gateway preserves that input but does not reconstruct missing history from a
+`previous_response_id`.
+
+`start-agent-gateway.ps1` refreshes configured provider key variables from the
+current Windows user environment before starting child services. This avoids
+reusing an expired value inherited from a long-lived PowerShell/Codex parent;
+key values remain outside the repository.
+
+As of 2026-11-03, OpenCode Go documents DeepSeek V4.1 Flash as requiring
+`Global` under the workspace's Privacy → Regions settings. This is an
+account-side region permission, not a Gateway setting; recheck the [current Go
+privacy guidance](https://opencode.ai/v2/docs/console/go/) before changing it.
+
+To smoke-test with the Desktop-bundled CLI (not npm):
+
+```powershell
+$codex = Get-ChildItem "$env:LOCALAPPDATA\OpenAI\Codex\bin" -Filter codex.exe -Recurse |
+  Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
+& $codex exec --model 'opencode-go/deepseek-v4.1-flash' --sandbox read-only `
+  --skip-git-repo-check --ephemeral --cd $env:TEMP 'Reply with exactly gateway-ok.'
+```
+
 ## Local development
 
 ```powershell
