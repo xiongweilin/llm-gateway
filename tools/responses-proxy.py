@@ -38,7 +38,7 @@ INPUT_TOKEN_BUDGET = 950_000
 CONTROL_PLANE_PATH_PREFIX = "/v1/alpha"
 OPENCODE_SESSION_HEADER = "x-opencode-session"
 OPENCODE_MODEL_PREFIX = "opencode-go/"
-DEEPSEEK_FLASH_MODEL_MARKER = "deepseek-flash"
+DEEPSEEK_FLASH_MODEL_MARKERS = ("deepseek-flash", "deepseek-v4.1-flash")
 DEEPSEEK_FLASH_MODEL = "opencode-go/deepseek-flash"
 
 
@@ -179,9 +179,10 @@ def is_opencode_model(model: object) -> bool:
 
 
 def is_deepseek_flash_model(model: object) -> bool:
-    """Return whether a model is the requested DeepSeek Flash OpenCode Go route."""
-    return isinstance(model, str) and model.startswith(
-        f"{OPENCODE_MODEL_PREFIX}{DEEPSEEK_FLASH_MODEL_MARKER}"
+    """Return whether a model uses the DeepSeek Flash OpenCode Go compatibility path."""
+    return isinstance(model, str) and any(
+        model.startswith(f"{OPENCODE_MODEL_PREFIX}{marker}")
+        for marker in DEEPSEEK_FLASH_MODEL_MARKERS
     )
 
 
@@ -270,6 +271,29 @@ def ensure_opencode_session(
     extra_headers[OPENCODE_SESSION_HEADER] = session
     obj["extra_headers"] = extra_headers
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode(), session
+
+
+def normalize_deepseek_portable_responses_body(body: bytes) -> bytes:
+    """Drop local/native-only fields before OpenCode Go's portable Chat route.
+
+    DeepSeek V4.1 Flash advertises a Chat Completions target, not a native
+    Responses target. The portable Responses router rejects ``stream_options``
+    and body-level ``extra_headers`` while accepting the complete conversation
+    in ``input``. The required session value is sent as an HTTP header instead.
+    Keep the full input and normal ``stream`` flag intact.
+    """
+    try:
+        obj = json.loads(body)
+    except Exception:
+        return body
+    if not isinstance(obj, dict) or not is_deepseek_flash_model(obj.get("model")):
+        return body
+    unsupported = ("stream_options", "extra_headers")
+    if not any(field in obj for field in unsupported):
+        return body
+    for field in unsupported:
+        obj.pop(field, None)
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
 
 
 def set_opencode_session(body: bytes, session: str | None) -> bytes:
@@ -988,7 +1012,6 @@ async def _generate_muse_checkpoint(
         "instructions": MUSE_COMPACTION_INSTRUCTIONS,
         "stream": False,
         "max_output_tokens": MUSE_COMPACTION_MAX_OUTPUT_TOKENS,
-        "extra_headers": {OPENCODE_SESSION_HEADER: f"{opencode_session}-compact"},
     }
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
     request_headers = _internal_request_headers(headers, f"{opencode_session}-compact")
@@ -2771,6 +2794,9 @@ async def handle(
             if len(dec) != before_len:
                 after = request_summary(dec)
                 log.warning("request summary after truncation %s", json.dumps(after, sort_keys=True))
+
+    if is_deepseek_flash_model(model):
+        dec = normalize_deepseek_portable_responses_body(dec)
 
     control_plane_route = is_control_plane_path(req.path)
     using_control_plane = bool(control_plane_backend) and control_plane_route

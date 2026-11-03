@@ -1249,6 +1249,32 @@ def test_opencode_session_is_injected_without_touching_gpt_requests() -> None:
 
 
 
+def test_deepseek_portable_response_drops_nonportable_fields_only() -> None:
+    request = {
+        "model": "opencode-go/deepseek-v4.1-flash",
+        "input": [{"type": "message", "role": "user", "content": "hello"}],
+        "stream": True,
+        "stream_options": {"include_usage": True},
+        "extra_headers": {"x-opencode-session": "session-1"},
+    }
+
+    normalized = json.loads(
+        proxy.normalize_deepseek_portable_responses_body(json.dumps(request).encode())
+    )
+
+    assert normalized == {
+        "model": "opencode-go/deepseek-v4.1-flash",
+        "input": [{"type": "message", "role": "user", "content": "hello"}],
+        "stream": True,
+    }
+
+    gpt = {"model": "gpt-6-luna", "stream_options": {"include_usage": True}}
+    unchanged = proxy.normalize_deepseek_portable_responses_body(
+        json.dumps(gpt).encode()
+    )
+    assert unchanged == json.dumps(gpt).encode()
+
+
 def test_set_opencode_session_replaces_embedded_epoch_without_touching_gpt() -> None:
     muse = {
         "model": "opencode-go/deepseek-flash",

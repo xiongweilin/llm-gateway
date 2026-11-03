@@ -8,30 +8,44 @@ models:
     api_base: https://chatgpt.com/backend-api/codex
     authorization: chatgpt
 
+  - id: gpt-6.1-terra
+    mode: responses
+    upstream_model: gpt-6.1-terra
+    api_base: https://chatgpt.com/backend-api/codex
+    authorization: chatgpt
+
   - id: gpt-6-luna
     mode: responses
     upstream_model: gpt-6-luna
     api_base: https://chatgpt.com/backend-api/codex
     authorization: chatgpt
 
-  - id: opencode-go/deepseek-flash
+  - id: opencode-go/deepseek-v4.1-flash
     mode: responses
-    upstream_model: deepseek-flash
+    upstream_model: deepseek-v4.1-flash
     api_base_env: OPENCODEGO_API_BASE
-    api_base: https://opencode.ai/zen/go/v1
+    api_base: https://opencode.ai/inference/go/openai/v1
     api_key_env: OPENCODEGO_API_KEY
     compatibility: opencode-go
 
-  - id: sonnet-5.5
-    mode: messages
-    upstream_model: claude-sonnet-5-5
-    api_base: https://kitool.ai
-    api_key_env: KITOOL_API_KEY
-    codex_responses: true
+#   - id: opencode-go/deepseek-flash
+#     mode: responses
+#     upstream_model: deepseek-flash
+#     api_base_env: OPENCODEGO_API_BASE
+#     api_base: https://opencode.ai/zen/go/v1
+#     api_key_env: OPENCODEGO_API_KEY
+#     compatibility: opencode-go
 
-  - id: opus-5.5
-    mode: messages
-    upstream_model: claude-opus-5-5
-    api_base: https://kitool.ai
-    api_key_env: KITOOL_API_KEY
-    codex_responses: true
+#   - id: sonnet-5.5
+#     mode: messages
+#     upstream_model: claude-sonnet-5-5
+#     api_base: https://kitool.ai
+#     api_key_env: KITOOL_API_KEY
+#     codex_responses: true
+
+#   - id: opus-5.5
+#     mode: messages
+#     upstream_model: claude-opus-5-5
+#     api_base: https://kitool.ai
+#     api_key_env: KITOOL_API_KEY
+#     codex_responses: true

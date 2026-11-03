@@ -61,6 +61,33 @@ if (-not (Test-Path -LiteralPath $Python -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $Python -PathType Leaf)) {
     throw "gateway Python environment was not created: $Python"
 }
+
+# 长期运行的 Codex 或 PowerShell 父进程可能保留已过期的 provider key。
+# 启动子服务前，按路由声明从当前用户环境刷新 provider key。
+$ModelRouteText = [System.IO.File]::ReadAllText($ModelsPath)
+$ProviderKeyNames = @(
+    [regex]::Matches(
+        $ModelRouteText,
+        '(?m)^\s+api_key_env:\s*(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*$'
+    ) |
+    ForEach-Object { $_.Groups['name'].Value } |
+    Sort-Object -Unique
+)
+foreach ($ProviderKeyName in $ProviderKeyNames) {
+    $UserProviderKey = [Environment]::GetEnvironmentVariable(
+        $ProviderKeyName,
+        [EnvironmentVariableTarget]::User
+    )
+    if (-not [string]::IsNullOrWhiteSpace($UserProviderKey)) {
+        [Environment]::SetEnvironmentVariable(
+            $ProviderKeyName,
+            $UserProviderKey,
+            [EnvironmentVariableTarget]::Process
+        )
+    }
+}
+Remove-Variable UserProviderKey -ErrorAction SilentlyContinue
+
 New-Item -ItemType Directory -Path $RuntimeDir -Force | Out-Null
 
 function Get-PortOwner {

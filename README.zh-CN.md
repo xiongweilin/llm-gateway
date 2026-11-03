@@ -35,6 +35,23 @@ Gateway token store 位于 `~/.config/llm/chatgpt/auth.json`；刷新和 device-
 
 Core 会直接向配置的 provider API 发送请求。公开 model id 保持稳定，而 `upstream_model` 选择 provider 侧的模型。
 
+### OpenCode Go 的 Codex Responses 兼容
+
+Codex 的 Responses 请求进入 4101 Agent，再由 4102 Responses 适配器转发给 4100 Core。4103 服务的是发送 Chat Completions 的客户端，不在 Codex 的 Responses 请求链上。DeepSeek V4.1 Flash 当前公布的原生上游协议是 Chat Completions，因此 OpenCode Go 的 `/responses` 入口需要 portable routing。Responses 适配器保留完整 `input`、`stream` 和 HTTP `x-opencode-session`，并移除 portable route 不接受的 `stream_options` 与内部 body 字段 `extra_headers`；session 值从 Codex 对话元数据生成后通过 HTTP header 发送。Portable routing 要求 `input` 包含当前完整对话；Gateway 会保留该字段，但不会从 `previous_response_id` 重建缺失历史。
+
+`start-agent-gateway.ps1` 启动子服务前，会按 `core/models.yaml` 中声明的变量名，从当前 Windows 用户环境刷新 provider key，避免从长期运行的 PowerShell/Codex 父进程继承过期值；key 值不写入仓库。
+
+截至 2026-11-03，OpenCode Go 文档要求 DeepSeek V4.1 Flash 在 workspace 的 Privacy → Regions 中允许 `Global`。这是 OpenCode 账户侧的地区权限，不是 Gateway 配置；修改前应复核[当前 Go 隐私说明](https://opencode.ai/v2/docs/console/go/)。
+
+使用 Desktop 附带的 CLI（不是 npm）做最小调用核验：
+
+```powershell
+$codex = Get-ChildItem "$env:LOCALAPPDATA\OpenAI\Codex\bin" -Filter codex.exe -Recurse |
+  Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
+& $codex exec --model 'opencode-go/deepseek-v4.1-flash' --sandbox read-only `
+  --skip-git-repo-check --ephemeral --cd $env:TEMP 'Reply with exactly gateway-ok.'
+```
+
 ## 本地开发
 
 ```powershell
